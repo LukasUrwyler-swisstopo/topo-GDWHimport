@@ -49,7 +49,14 @@ Vorgehen pro Tile (siehe Docstrings der einzelnen Funktionen fuer Details):
          das anfordert) - inject_reference_vlrs() entfernt eine solche
          uebernommene VLR deshalb, statt abzubrechen (siehe dortiger
          Docstring).
-  5. Vollstaendige Nachkonversions-Validierung (siehe validate_target).
+  5. Vollstaendige Nachkonversions-Validierung (siehe validate_target und
+     validate_point_ranges). Die BBox wird dabei gegen die tatsaechlichen
+     Punkt-Extremwerte der Quelle geprueft, NICHT gegen deren Header-BBox:
+     manche Quell-Batches (z.B. Job RANDA 2020, Vorfall 10.9.2026) haben
+     eine Header-BBox, die nicht zu den eigenen Punkten passt (Z bis 2.3 cm
+     daneben, vermutlich nach Filterung/Ausduennung nicht nachgefuehrt).
+     PDAL berechnet den Ziel-Header ohnehin neu aus den Punkten - ein
+     ungenauer Quell-Header wird deshalb nur als Warnung gemeldet.
      Erst bei vollstaendigem Erfolg wird die Zieldatei atomar (os.replace)
      geschrieben. Bei jedem Fehler bleibt eine evtl. vorhandene Zieldatei
      unangetastet, die Temp-Datei wird verworfen.
@@ -107,6 +114,12 @@ TARGET_POINT_LENGTH = 30
 TARGET_HEADER_SIZE = 375
 TARGET_GLOBAL_ENCODING = 17  # Bit 0 (Adjusted Standard GPS Time) + Bit 4 (WKT)
 BBOX_TOLERANCE_M = 0.01  # 1 cm, siehe Anforderung
+# Dimensionen, deren tatsaechliche Min/Max-Werte (aus den Punkten, NICHT aus
+# dem Header) waehrend der Konversion mitgemessen werden (siehe convert_tile)
+STATS_DIMENSIONS = ("X", "Y", "Z", "Classification")
+# Header-BBox-Feld -> (Dimension, Index in (minimum, maximum))
+BBOX_FIELDS = (("minx", "X", 0), ("maxx", "X", 1), ("miny", "Y", 0),
+               ("maxy", "Y", 1), ("minz", "Z", 0), ("maxz", "Z", 1))
 
 # Kachelname-Muster: "..._<easting_km>_<northing_km>_LV95_LN02.laz"
 # Bsp: 2025_BIRCH_BLATTEN_TIN_..._2623_1138_LV95_LN02.laz -> (2623, 1138)
@@ -187,35 +200,38 @@ def pdal_metadata(file_path):
     return json.loads(result.stdout)
 
 
-def pdal_classification_range(file_path):
-    """Liest Minimum/Maximum der Dimension 'Classification' (einzelner,
-    gezielter Scan - nicht 'pdal info --stats' ueber alle Dimensionen, um bei
-    grossen Tiles nicht unnoetig viele Spalten zu lesen)."""
+def _ranges_from_statistic(statistic):
+    """Wandelt PDALs 'statistic'-Liste (ein Eintrag pro Dimension mit 'name',
+    'minimum', 'maximum', ...) in {dimension: (minimum, maximum)} um."""
+    if isinstance(statistic, dict):  # Absicherung, falls PDAL einen Einzeleintrag nicht als Liste ausgibt
+        statistic = [statistic]
+    return {stat.get("name"): (stat.get("minimum"), stat.get("maximum"))
+            for stat in statistic or []}
+
+
+def pdal_dimension_ranges(file_path, dimensions=STATS_DIMENSIONS):
+    """Liest Minimum/Maximum der angegebenen Dimensionen aus den tatsaechlichen
+    Punkten (gezielter Scan nur dieser Dimensionen - nicht 'pdal info --stats'
+    ueber alle, um bei grossen Tiles nicht unnoetig viele Spalten auszuwerten).
+    Gibt {dimension: (minimum, maximum)} zurueck."""
     result = subprocess.run(
-        [_find_pdal_exe(), "info", "--dimensions", "Classification", "--stats", file_path],
+        [_find_pdal_exe(), "info", "--dimensions", ",".join(dimensions), "--stats", file_path],
         capture_output=True, text=True, check=True,
     )
     data = json.loads(result.stdout)
-    for stat in data.get("stats", {}).get("statistic", []):
-        if stat.get("name") == "Classification":
-            return stat.get("minimum"), stat.get("maximum")
-    return None, None
+    return _ranges_from_statistic(data.get("stats", {}).get("statistic"))
 
 
-def classification_range_from_pipeline_metadata(pipeline_metadata):
-    """Liest Minimum/Maximum von 'Classification' aus der Metadata einer
+def dimension_ranges_from_pipeline_metadata(pipeline_metadata):
+    """Liest Minimum/Maximum pro Dimension aus der Metadata einer
     'pdal pipeline --metadata ...'-Ausfuehrung, deren Pipeline eine
-    'filters.stats(dimensions=Classification)'-Stage enthaelt (siehe
-    convert_tile). Struktur empirisch verifiziert (PDAL 2.10.0): identisch
-    zu 'pdal info --dimensions Classification --stats', nur unter
-    metadata["stages"]["filters.stats"] statt metadata["stats"] verschachtelt.
-    Gibt (None, None) zurueck, falls die Stage/Dimension fehlt - der Aufrufer
-    faellt dann auf einen regulaeren 'pdal info'-Aufruf zurueck."""
+    'filters.stats'-Stage enthaelt (siehe convert_tile). Struktur empirisch
+    verifiziert (PDAL 2.10.0, mit Classification): identisch zu
+    'pdal info --stats', nur unter metadata["stages"]["filters.stats"] statt
+    metadata["stats"] verschachtelt. Gibt {} zurueck, falls die Stage fehlt -
+    der Aufrufer faellt dann auf einen regulaeren 'pdal info'-Aufruf zurueck."""
     stats = ((pipeline_metadata or {}).get("stages") or {}).get("filters.stats") or {}
-    for stat in stats.get("statistic", []):
-        if stat.get("name") == "Classification":
-            return stat.get("minimum"), stat.get("maximum")
-    return None, None
+    return _ranges_from_statistic(stats.get("statistic"))
 
 
 def run_pdal_pipeline(pipeline_dict, capture_metadata=False):
@@ -475,11 +491,10 @@ def inject_reference_vlrs(las_path):
 
 # ****************************** Validierung Quelle vs. Ziel ******************************
 def validate_target(src_metadata, dst_metadata):
-    """Nachkonversions-Validierung (ausser Classification, siehe
-    validate_classification_unchanged). Gibt eine Liste von Fehler-Strings
-    zurueck (leer = alles OK). Prueft NUR (keine Reparatur):
+    """Nachkonversions-Validierung der Header-/CRS-Angaben (BBox und
+    Classification separat, siehe validate_point_ranges). Gibt eine Liste
+    von Fehler-Strings zurueck (leer = alles OK). Prueft NUR (keine Reparatur):
       - Punktanzahl identisch
-      - BBox identisch innerhalb 1 cm Toleranz
       - minor_version==4, dataformat_id==6, point_length==30, header_size==375
       - global_encoding==17
       - beide CRS-VLRs vorhanden (record_id 34735 und 2112), VLR 2112 endet
@@ -494,15 +509,6 @@ def validate_target(src_metadata, dst_metadata):
 
     if src_md.get("count") != dst_md.get("count"):
         problems.append(f"Punktanzahl weicht ab: Quelle {src_md.get('count')} vs. Ziel {dst_md.get('count')}")
-
-    for key in ("minx", "maxx", "miny", "maxy", "minz", "maxz"):
-        try:
-            d = abs(float(src_md[key]) - float(dst_md[key]))
-        except (KeyError, TypeError, ValueError):
-            problems.append(f"BBox-Feld '{key}' fehlt in Quelle oder Ziel.")
-            continue
-        if d > BBOX_TOLERANCE_M:
-            problems.append(f"BBox-Feld '{key}' weicht {d:.4f} m ab (Toleranz {BBOX_TOLERANCE_M} m).")
 
     if dst_md.get("minor_version") != TARGET_MINOR_VERSION:
         problems.append(f"minor_version={dst_md.get('minor_version')}, erwartet {TARGET_MINOR_VERSION}")
@@ -543,36 +549,73 @@ def validate_target(src_metadata, dst_metadata):
     if "5729" in wkt_text or "LHN95" in wkt_text:
         problems.append("Ziel-WKT enthaelt '5729' oder 'LHN95' (LHN95 statt LN02) - FACHLICHER FEHLER.")
 
-    # Classification-Vergleich (Quelle vs. Ziel) erfolgt separat in
-    # validate_classification_unchanged() - dort liegen beide Pfade vor.
-
     return problems
 
 
-def validate_classification_unchanged(src_range, dst_path):
-    """Vergleicht Minimum/Maximum der Classification-Dimension zwischen
-    Quelle und Ziel. Gibt eine Liste von Fehler-Strings zurueck (leer = OK).
+def header_bbox_deviations(metadata, ranges):
+    """Vergleicht die Header-BBox (minx..maxz aus 'pdal info --metadata') mit
+    den tatsaechlichen Punkt-Extremwerten (ranges, siehe
+    pdal_dimension_ranges). Gibt eine Liste mit Beschreibungen aller Felder
+    zurueck, die mehr als BBOX_TOLERANCE_M abweichen oder nicht ermittelbar
+    sind (leer = Header passt zu den Punkten)."""
+    md = metadata.get("metadata") or {}
+    deviations = []
+    for key, dim, idx in BBOX_FIELDS:
+        try:
+            header_value = float(md[key])
+            point_value = float(ranges[dim][idx])
+        except (KeyError, TypeError, ValueError):
+            deviations.append(f"'{key}' nicht ermittelbar")
+            continue
+        d = abs(header_value - point_value)
+        if d > BBOX_TOLERANCE_M:
+            deviations.append(f"'{key}' Header {header_value:.3f} vs. Punkte {point_value:.3f} ({d:.4f} m)")
+    return deviations
 
-    src_range = (minimum, maximum) der QUELLE, i.d.R. bereits waehrend der
-    Konversions-Pipeline mitgemessen (siehe convert_tile /
-    classification_range_from_pipeline_metadata) - dafuer wird die Quelle
-    NICHT nochmal separat eingelesen. Fuer das ZIEL ist ein eigener
-    'pdal info'-Aufruf unvermeidbar: erst er bestaetigt, was nach der
-    LAS1.2(PF1)->LAS1.4(PF6)-Punktformat-Umwandlung tatsaechlich auf der
-    Platte steht (PF1 packt Classification als 5-Bit-Wert zusammen mit
-    Flag-Bits in ein Byte, PF6 trennt beides - das ist die Stelle, an der ein
-    Konversionsfehler die Klasse tatsaechlich veraendern koennte)."""
+
+def validate_point_ranges(src_ranges, dst_ranges, dst_metadata):
+    """Vergleicht die tatsaechlichen Punkt-Extremwerte (X/Y/Z, Classification)
+    von Quelle und Ziel sowie die Ziel-Header-BBox mit den Ziel-Punkten.
+    Gibt eine Liste von Fehler-Strings zurueck (leer = OK).
+
+    Bewusst NICHT Quell-Header gegen Ziel-Header (fruehere Version): PDAL
+    schreibt die Ziel-BBox immer neu aus den Punkten, die Quell-BBox stammt
+    dagegen aus deren Header und kann ungenau sein (Vorfall 10.9.2026, Job
+    RANDA 2020, siehe Modul-Docstring) - dann schlug die Pruefung fehl,
+    obwohl die Punkte korrekt konvertiert waren. Die Requantisierung
+    (Scale 0.001 -> 0.01) verschiebt jede Koordinate um hoechstens eine halbe
+    Ziel-Scale (5 mm), BBOX_TOLERANCE_M (1 cm) reicht also aus.
+
+    src_ranges stammt aus dem ohnehin noetigen Lesedurchlauf der Konversions-
+    Pipeline (filters.stats, siehe convert_tile) - die Quelle wird dafuer
+    NICHT nochmal separat eingelesen. dst_ranges braucht einen eigenen
+    'pdal info'-Aufruf: erst er bestaetigt, was nach der LAS1.2(PF1)->
+    LAS1.4(PF6)-Punktformat-Umwandlung tatsaechlich auf der Platte steht (PF1
+    packt Classification als 5-Bit-Wert zusammen mit Flag-Bits in ein Byte,
+    PF6 trennt beides - das ist die Stelle, an der ein Konversionsfehler die
+    Klasse tatsaechlich veraendern koennte)."""
     problems = []
-    src_min, src_max = src_range
-    try:
-        dst_min, dst_max = pdal_classification_range(dst_path)
-    except Exception as e:
-        return [f"Classification-Pruefung fehlgeschlagen: {e}"]
-    if (src_min, src_max) != (dst_min, dst_max):
+    for key, dim, idx in BBOX_FIELDS:
+        try:
+            d = abs(float(src_ranges[dim][idx]) - float(dst_ranges[dim][idx]))
+        except (KeyError, TypeError, ValueError):
+            problems.append(f"Punkt-Extremwert '{key}' fehlt in Quelle oder Ziel.")
+            continue
+        if d > BBOX_TOLERANCE_M:
+            problems.append(f"Punkt-Extremwert '{key}' weicht {d:.4f} m ab (Toleranz {BBOX_TOLERANCE_M} m).")
+
+    src_class, dst_class = src_ranges.get("Classification"), dst_ranges.get("Classification")
+    if not src_class or not dst_class or None in tuple(src_class) + tuple(dst_class):
+        problems.append("Classification-Statistik fehlt in Quelle oder Ziel.")
+    elif tuple(src_class) != tuple(dst_class):
         problems.append(
-            f"Classification veraendert: Quelle min/max={src_min}/{src_max}, "
-            f"Ziel min/max={dst_min}/{dst_max}"
+            f"Classification veraendert: Quelle min/max={src_class[0]}/{src_class[1]}, "
+            f"Ziel min/max={dst_class[0]}/{dst_class[1]}"
         )
+
+    header_problems = header_bbox_deviations(dst_metadata, dst_ranges)
+    if header_problems:
+        problems.append("Ziel-Header-BBox passt nicht zu den Ziel-Punkten: " + "; ".join(header_problems))
     return problems
 
 
@@ -659,29 +702,35 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False):
         if compression:
             writer_opts["compression"] = compression
 
-        # 'filters.stats' auf Classification haengt sich als reiner
-        # Durchlauf-Filter (veraendert keine Punkte) an den ohnehin
-        # noetigen Lesedurchlauf der Quelle an - liefert deren
-        # Classification-Min/Max praktisch gratis mit, ohne die Quelle
-        # dafuer ein zweites Mal komplett einzulesen (empirisch mit PDAL
-        # 2.10.0 verifiziert, siehe classification_range_from_pipeline_metadata).
+        # 'filters.stats' haengt sich als reiner Durchlauf-Filter (veraendert
+        # keine Punkte) an den ohnehin noetigen Lesedurchlauf der Quelle an -
+        # liefert deren tatsaechliche Min/Max-Werte (X/Y/Z, Classification)
+        # praktisch gratis mit, ohne die Quelle dafuer ein zweites Mal
+        # komplett einzulesen (siehe dimension_ranges_from_pipeline_metadata).
         pipeline = {"pipeline": [
             {"type": "readers.las", "filename": src_path},
-            {"type": "filters.stats", "dimensions": "Classification"},
+            {"type": "filters.stats", "dimensions": ",".join(STATS_DIMENSIONS)},
             writer_opts,
         ]}
         pipeline_meta = run_pdal_pipeline(pipeline, capture_metadata=True)
 
-        src_class_range = classification_range_from_pipeline_metadata(pipeline_meta)
-        if src_class_range == (None, None):
+        src_ranges = dimension_ranges_from_pipeline_metadata(pipeline_meta)
+        if not all(dim in src_ranges for dim in STATS_DIMENSIONS):
             # Fallback, falls die Stage/Metadata unerwartet fehlt (z.B.
-            # aeltere PDAL-Version) - dann wie zuvor ein separater Aufruf,
-            # damit die Pruefung nie stillschweigend uebersprungen wird.
+            # aeltere PDAL-Version) - dann ein separater Aufruf, damit die
+            # Pruefung nie stillschweigend uebersprungen wird.
             try:
-                src_class_range = pdal_classification_range(src_path)
+                src_ranges = pdal_dimension_ranges(src_path)
             except Exception as e:
-                result["error"] = f"Classification-Ermittlung (Quelle) fehlgeschlagen: {e}"
+                result["error"] = f"Statistik-Ermittlung (Quelle) fehlgeschlagen: {e}"
                 return result
+
+        stale_header = header_bbox_deviations(src_meta, src_ranges)
+        if stale_header:
+            result["warnings"].append(
+                f"{name}: Header-BBox der Quelle passt nicht zu den eigenen Punkten "
+                f"({'; '.join(stale_header)}) - Ziel-Header wird aus den Punkten neu berechnet."
+            )
 
         n_stripped_vlrs = inject_reference_vlrs(tmp_path)
         if n_stripped_vlrs:
@@ -693,7 +742,12 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False):
 
         dst_meta = pdal_metadata(tmp_path)
         problems = validate_target(src_meta, dst_meta)
-        problems.extend(validate_classification_unchanged(src_class_range, tmp_path))
+        try:
+            dst_ranges = pdal_dimension_ranges(tmp_path)
+        except Exception as e:
+            problems.append(f"Statistik-Ermittlung (Ziel) fehlgeschlagen: {e}")
+        else:
+            problems.extend(validate_point_ranges(src_ranges, dst_ranges, dst_meta))
 
         if problems:
             result["error"] = "; ".join(problems)

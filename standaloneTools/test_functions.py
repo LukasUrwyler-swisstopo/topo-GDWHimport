@@ -61,6 +61,10 @@ organiz = _import_script("2_1_SB_DOP_16_FOLDERorganize_by_lineID.py")
 # Logik), kann also immer importiert werden.
 osgeo_runner = _import_script("_osgeo_runner.py")
 
+# Script 4 (LAS14-Vorkonversion) nutzt nur die Standardbibliothek (PDAL laeuft
+# per subprocess) - die Validierungsfunktionen sind reine Dict-Vergleiche.
+las14 = _import_script("4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py")
+
 # fix_false_nodata (Script 3) braucht echtes scipy (ndimage.label) fuer
 # sinnvolle Tests der Connected-Component-Klassifikation - das laesst sich
 # nicht sinnvoll mocken. Import defensiv, damit die restliche Testsuite auch
@@ -920,6 +924,78 @@ class TestFixNodataSicherheitsDefaults(unittest.TestCase):
         self.assertEqual(sig.parameters["min_border_contact"].default, 100)
         self.assertFalse(sig.parameters["enable_gradient_check"].default)
         self.assertFalse(sig.parameters["enable_fill_ratio_check"].default)
+
+
+# ============================================================
+#  BBox-/Classification-Validierung (aus Script 4)
+#  Regressionsschutz Vorfall RANDA 2020 (10.9.2026): Quell-Header-BBox
+#  passte nicht zu den eigenen Punkten -> 13 Kacheln faelschlich abgelehnt.
+# ============================================================
+_LAS14_XY = {"X": (2629000.012, 2629999.987), "Y": (1106000.004, 1106999.991)}
+
+
+def _las14_ranges(minz, maxz, classification=(1, 6)):
+    return dict(_LAS14_XY, Z=(minz, maxz), Classification=classification)
+
+
+def _las14_header(ranges, **override):
+    """Metadaten wie aus 'pdal info --metadata', Header-BBox passend zu ranges."""
+    md = {key: ranges[dim][idx] for key, dim, idx in las14.BBOX_FIELDS}
+    md.update(override)
+    return {"metadata": md}
+
+
+class TestLas14PunktValidierung(unittest.TestCase):
+
+    def test_ungenauer_quell_header_nur_warnung(self):
+        # wie 2629_1106: Quell-Header maxz 2.3 cm ueber dem hoechsten Punkt
+        src = _las14_ranges(2412.345, 4190.100)
+        dst = _las14_ranges(2412.35, 4190.10)
+        deviations = las14.header_bbox_deviations(_las14_header(src, maxz=4190.123), src)
+        self.assertEqual(len(deviations), 1)
+        self.assertIn("'maxz'", deviations[0])
+        self.assertEqual(las14.validate_point_ranges(src, dst, _las14_header(dst)), [])
+
+    def test_requantisierung_innerhalb_toleranz(self):
+        # Scale 0.001 -> 0.01: max. 5 mm Rundung
+        src = _las14_ranges(2412.345, 4190.105)
+        dst = _las14_ranges(2412.35, 4190.11)
+        self.assertEqual(las14.validate_point_ranges(src, dst, _las14_header(dst)), [])
+
+    def test_verschobene_punkte_sind_fehler(self):
+        src = _las14_ranges(2412.345, 4190.100)
+        dst = _las14_ranges(2412.345, 4190.150)
+        problems = las14.validate_point_ranges(src, dst, _las14_header(dst))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("'maxz'", problems[0])
+
+    def test_ziel_header_passt_nicht_zu_ziel_punkten(self):
+        pts = _las14_ranges(2412.345, 4190.100)
+        problems = las14.validate_point_ranges(pts, pts, _las14_header(pts, minz=2412.0))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Ziel-Header", problems[0])
+
+    def test_classification_veraendert(self):
+        src = _las14_ranges(2412.345, 4190.100, classification=(1, 6))
+        dst = _las14_ranges(2412.345, 4190.100, classification=(0, 6))
+        problems = las14.validate_point_ranges(src, dst, _las14_header(dst))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Classification veraendert", problems[0])
+
+    def test_fehlende_statistik_ist_fehler(self):
+        # darf nie stillschweigend als OK durchgehen
+        src = _las14_ranges(2412.345, 4190.100)
+        self.assertTrue(las14.validate_point_ranges(src, {}, _las14_header(src)))
+        dst = _las14_ranges(2412.345, 4190.100, classification=(None, None))
+        self.assertTrue(las14.validate_point_ranges(src, dst, _las14_header(dst)))
+
+    def test_ranges_aus_pipeline_metadata(self):
+        meta = {"stages": {"filters.stats": {"statistic": [
+            {"name": "Z", "minimum": 2412.345, "maximum": 4190.1},
+            {"name": "Classification", "minimum": 1, "maximum": 6}]}}}
+        self.assertEqual(las14.dimension_ranges_from_pipeline_metadata(meta),
+                         {"Z": (2412.345, 4190.1), "Classification": (1, 6)})
+        self.assertEqual(las14.dimension_ranges_from_pipeline_metadata(None), {})
 
 
 if __name__ == "__main__":
