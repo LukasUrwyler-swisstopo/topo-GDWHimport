@@ -12,7 +12,7 @@ Ein GUI-Tool, das den kompletten Ablauf von der Datenvorbereitung bis zum STAC-I
 python pfad/GUI_importToGDWH-STAC_SpezialBefliegung.py
 ```
 
-<img width="453" height="692" alt="image" src="https://github.com/user-attachments/assets/94a84229-81f6-4514-99ee-1ad0c78f4058" />
+<img width="1000" height="1400" alt="image" src="https://github.com/user-attachments/assets/94a84229-81f6-4514-99ee-1ad0c78f4058" />
 
 
 Alle Angaben (GDS, Pfade, Meta-Informationen) werden direkt im GUI ausgefüllt – kein manuelles Bearbeiten der Scripts nötig.
