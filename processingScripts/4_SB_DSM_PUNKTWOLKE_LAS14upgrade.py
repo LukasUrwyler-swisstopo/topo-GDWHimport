@@ -20,7 +20,10 @@ in ein separates Zielverzeichnis, die Quelldateien bleiben unveraendert.
 Vorgehen pro Tile (siehe Docstrings der einzelnen Funktionen fuer Details):
   1. Kachelursprung deterministisch aus dem Dateinamen parsen (Regex), NICHT
      aus dem Datenminimum. Plausibilitaetspruefung gegen die Schweizer
-     Landesgrenzen (LV95, in km).
+     Landesgrenzen (LV95, in km). Kachelrahmen-Pruefung (1x1 km):
+     massgeblich sind die tatsaechlichen Punkte, die Header-BBox ist nur
+     Vorfilter (siehe check_tile_frame_plausibility - Vorfall 14.9.2026, Job
+     RHONE 2017: auf 1 km geclippte Kacheln mit 2 km breiter Header-BBox).
   2. Zielformat bestimmen (choose_target_point_format): PF7 nur bei
      keep_rgb=True UND echten RGB-Werten in der Quelle, sonst PF6. RGB-Werte
      bei keep_rgb=False (ADS) sind ein harter Fehler. Die Farbkanaele werden
@@ -148,6 +151,7 @@ TILE_NAME_PATTERN = re.compile(r'(\d{4})_(\d{4})_LV95_LN02\.laz$', re.IGNORECASE
 # Plausibilitaet der Kachelkoordinaten: Schweizer Landesgrenzen in km, LV95
 LV95_EASTING_KM_RANGE = (2480, 2840)
 LV95_NORTHING_KM_RANGE = (1070, 1300)
+TILE_FRAME_EPS_M = 0.02  # Toleranz der Kachelrahmen-Pruefung gegen Rundungsrauschen am Rand
 
 # Byte-exakte VLR-Payloads aus der verifizierten swissSURFACE3D-Referenzkachel
 # 2655_1272.laz (LV95/LN02, EPSG:2056 horizontal + EPSG:5728 vertikal).
@@ -322,44 +326,91 @@ def parse_tile_from_filename(filename):
     return easting_km, northing_km
 
 
-def check_tile_frame_plausibility(metadata, easting_km, northing_km, filename):
+def _nominal_frame(easting_km, northing_km):
+    """Nominaler 1x1-km-Kachelrahmen als (minx, maxx, miny, maxy) in Metern."""
+    minx, miny = easting_km * 1000, northing_km * 1000
+    return minx, minx + 999.99, miny, miny + 999.99
+
+
+def _xy_bbox(ranges):
+    """(minx, maxx, miny, maxy) aus {dimension: (minimum, maximum)}, siehe
+    pdal_dimension_ranges. ValueError, falls X/Y fehlen."""
+    try:
+        return (float(ranges["X"][0]), float(ranges["X"][1]),
+                float(ranges["Y"][0]), float(ranges["Y"][1]))
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ValueError("X/Y-Extremwerte der Punkte nicht ermittelbar.")
+
+
+def frame_violation(bbox, easting_km, northing_km):
+    """Beschreibung der Ueberschreitung, wenn bbox (minx, maxx, miny, maxy)
+    ueber den nominalen Kachelrahmen hinausragt, sonst None."""
+    minx, maxx, miny, maxy = bbox
+    f_minx, f_maxx, f_miny, f_maxy = _nominal_frame(easting_km, northing_km)
+    eps = TILE_FRAME_EPS_M
+    if minx < f_minx - eps or maxx > f_maxx + eps or miny < f_miny - eps or maxy > f_maxy + eps:
+        return (f"BBox (X {minx:.2f}-{maxx:.2f}, Y {miny:.2f}-{maxy:.2f}) vs. erwarteter Rahmen "
+                f"(X {f_minx:.2f}-{f_maxx:.2f}, Y {f_miny:.2f}-{f_maxy:.2f})")
+    return None
+
+
+def check_tile_frame_plausibility(metadata, easting_km, northing_km, filename, src_path):
     """Vergleicht die Quell-BBox gegen den nominalen 1x1-km-Kachelrahmen.
 
-    Luecken zum Rand (z.B. Datenloecher) werden nur als Warnung geloggt, NICHT
-    repariert - die Konversion laeuft trotzdem weiter. Punkte AUSSERHALB des
-    Kachelrahmens sind dagegen ein harter Fehler (deutet auf falsch geparste
-    Kachelkoordinaten oder eine fehlplatzierte Datei hin).
+    Massgeblich sind die tatsaechlichen Punkte, die Header-BBox dient nur als
+    kostenloser Vorfilter - sie kann veraltet sein (Vorfall RANDA 2020, siehe
+    Modul-Docstring; Vorfall 14.9.2026, Job RHONE 2017: zwei auf 1 km
+    geclippte Kacheln meldeten eine 2 km breite Header-BBox). Erst wenn der
+    Header ueber den Rahmen hinausragt, werden die X/Y-Extremwerte der
+    Punkte gescannt (zusaetzlicher Lesedurchlauf, nur in diesem Fall):
+      - Punkte ausserhalb -> ValueError (harter Fehler: falsch geparste
+        Kachelkoordinaten, fehlplatzierte oder nicht geclippte Datei).
+      - Punkte innerhalb, nur der Header falsch -> Warnung, die Konversion
+        laeuft weiter. writers.las berechnet die Ziel-BBox aus den Punkten
+        neu, der Ziel-Header ist damit korrigiert (geprueft in
+        validate_point_ranges).
+    Den umgekehrten Fall (Header passt, Punkte ragen hinaus) faengt
+    convert_tile nach der Konversion gegen die Punkt-Extremwerte ab.
 
-    Gibt eine Liste von Warnungs-Strings zurueck; wirft ValueError bei Punkten
-    ausserhalb des Rahmens.
+    Luecken zum Rand (z.B. Datenloecher) werden nur als Warnung geloggt,
+    NICHT repariert.
+
+    Gibt (warnings, header_stale) zurueck. header_stale=True: Header passt
+    nachweislich nicht zu den Punkten - convert_tile schreibt die Kachel
+    dann auch neu, wenn sie bereits migriert ist, statt sie samt falschem
+    Header nur zu kopieren.
     """
     md = metadata.get("metadata") or {}
-    nominal_minx, nominal_miny = easting_km * 1000, northing_km * 1000
-    nominal_maxx, nominal_maxy = nominal_minx + 999.99, nominal_miny + 999.99
-    eps = 0.02  # Toleranz gegen Rundungsrauschen am Rand
-
     try:
-        minx, maxx = float(md["minx"]), float(md["maxx"])
-        miny, maxy = float(md["miny"]), float(md["maxy"])
+        bbox = tuple(float(md[k]) for k in ("minx", "maxx", "miny", "maxy"))
     except (KeyError, TypeError, ValueError):
-        return [f"{filename}: BBox nicht in Metadaten gefunden - Kachelrahmen-Pruefung uebersprungen."]
+        return [f"{filename}: BBox nicht in Metadaten gefunden - Kachelrahmen-Pruefung uebersprungen."], False
 
-    if minx < nominal_minx - eps or maxx > nominal_maxx + eps or \
-       miny < nominal_miny - eps or maxy > nominal_maxy + eps:
-        raise ValueError(
-            f"Punkte ausserhalb des Kachelrahmens: BBox (X {minx:.2f}-{maxx:.2f}, "
-            f"Y {miny:.2f}-{maxy:.2f}) vs. erwarteter Rahmen "
-            f"(X {nominal_minx:.2f}-{nominal_maxx:.2f}, Y {nominal_miny:.2f}-{nominal_maxy:.2f})."
-        )
+    warnings, header_stale = [], False
+    header_violation = frame_violation(bbox, easting_km, northing_km)
+    if header_violation:
+        try:
+            bbox = _xy_bbox(pdal_dimension_ranges(src_path, ("X", "Y")))
+        except Exception as e:
+            raise ValueError(f"Header-BBox ragt ueber den Kachelrahmen ({header_violation}), "
+                             f"Punkt-Pruefung fehlgeschlagen: {e}") from e
+        point_violation = frame_violation(bbox, easting_km, northing_km)
+        if point_violation:
+            raise ValueError(f"Punkte ausserhalb des Kachelrahmens: {point_violation}.")
+        header_stale = True
+        warnings.append(
+            f"{filename}: Header-BBox ragt ueber den Kachelrahmen ({header_violation}), die Punkte "
+            f"liegen aber innerhalb (X {bbox[0]:.2f}-{bbox[1]:.2f}, Y {bbox[2]:.2f}-{bbox[3]:.2f}) "
+            f"- Header veraltet, wird im Ziel aus den Punkten neu berechnet.")
 
-    warnings = []
-    gap_w, gap_s = minx - nominal_minx, miny - nominal_miny
-    gap_e, gap_n = nominal_maxx - maxx, nominal_maxy - maxy
-    for label, gap in (("West", gap_w), ("Sued", gap_s), ("Ost", gap_e), ("Nord", gap_n)):
-        if gap > eps:
+    minx, maxx, miny, maxy = bbox
+    f_minx, f_maxx, f_miny, f_maxy = _nominal_frame(easting_km, northing_km)
+    for label, gap in (("West", minx - f_minx), ("Sued", miny - f_miny),
+                       ("Ost", f_maxx - maxx), ("Nord", f_maxy - maxy)):
+        if gap > TILE_FRAME_EPS_M:
             warnings.append(f"{filename}: Datenluecke am {label}-Rand von {gap:.2f} m "
-                             f"(Kachelrahmen nicht vollstaendig gefuellt).")
-    return warnings
+                            f"(Kachelrahmen nicht vollstaendig gefuellt).")
+    return warnings, header_stale
 
 
 # ****************************** CRS-Aufloesung (Validierung) ******************************
@@ -729,11 +780,12 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=F
         return result
 
     try:
-        result["warnings"].extend(
-            check_tile_frame_plausibility(src_meta, easting_km, northing_km, name))
+        frame_warnings, header_stale = check_tile_frame_plausibility(
+            src_meta, easting_km, northing_km, name, src_path)
     except ValueError as e:
         result["error"] = str(e)
         return result
+    result["warnings"].extend(frame_warnings)
 
     src_md = src_meta.get("metadata") or {}
     if (src_md.get("global_encoding", 0) & 0x01) == 0:
@@ -758,7 +810,9 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=F
             f"{name}: CameraSystem mit Farbe gewaehlt, die Quelle fuehrt aber keine "
             f"RGB-Werte - Ziel PF{TARGET_POINT_FORMAT} (ohne Farbe).")
 
-    if is_already_migrated(src_meta, point_format):
+    # Veralteter Header (siehe check_tile_frame_plausibility): auch eine bereits
+    # migrierte Kachel neu schreiben lassen, damit PDAL die BBox korrigiert.
+    if not header_stale and is_already_migrated(src_meta, point_format):
         # KEIN direkter log()-Aufruf hier (anders als frueher): convert_tile
         # laeuft unter workers>1 parallel in mehreren Threads (siehe
         # convert_folder), log() soll aber ausschliesslich seriell aus dem
@@ -824,6 +878,14 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=F
             except Exception as e:
                 result["error"] = f"Statistik-Ermittlung (Quelle) fehlgeschlagen: {e}"
                 return result
+
+        # Kachelrahmen auch gegen die tatsaechlichen Punkte (aus filters.stats,
+        # kostet nichts): faengt den Fall ab, dass der Header einen passenden
+        # Rahmen meldet, die Punkte aber darueber hinausragen.
+        point_violation = frame_violation(_xy_bbox(src_ranges), easting_km, northing_km)
+        if point_violation:
+            result["error"] = f"Punkte ausserhalb des Kachelrahmens: {point_violation}."
+            return result
 
         stale_header = header_bbox_deviations(src_meta, src_ranges)
         if stale_header:

@@ -1074,5 +1074,89 @@ class TestLas14Zielformat(unittest.TestCase):
         self.assertNotIn("Leica ADS80", osgeo_runner.RGB_CAMERA_SYSTEMS)
 
 
+# ============================================================
+#  Kachelrahmen-Pruefung (aus Script 4)
+#  Regressionsschutz Vorfall RHONE 2017 (14.9.2026): auf 1 km geclippte
+#  Kacheln meldeten eine 2 km breite Header-BBox -> massgeblich sind die Punkte.
+# ============================================================
+_RHONE_NAME = "2017_RHONE_TIN_raw_2672_1163_LV95_LN02.laz"
+_RHONE_1KM = {"X": (2672000.00, 2672999.99), "Y": (1163000.01, 1163999.99)}
+_RHONE_2KM = {"X": (2672000.00, 2673999.99), "Y": (1163000.01, 1163999.99)}
+
+
+def _frame_meta(xy, **extra):
+    """Metadaten wie aus 'pdal info --metadata', Header-BBox aus xy."""
+    md = {"minx": xy["X"][0], "maxx": xy["X"][1], "miny": xy["Y"][0], "maxy": xy["Y"][1]}
+    md.update(extra)
+    return {"metadata": md}
+
+
+class TestLas14Kachelrahmen(unittest.TestCase):
+
+    def _check(self, header_xy, punkte):
+        with unittest.mock.patch.object(las14, "pdal_dimension_ranges", return_value=punkte) as scan:
+            result = las14.check_tile_frame_plausibility(
+                _frame_meta(header_xy), 2672, 1163, _RHONE_NAME, "k.laz")
+        return result, scan
+
+    def test_passender_header_ohne_punktscan(self):
+        (warnings, header_stale), scan = self._check(_RHONE_1KM, _RHONE_1KM)
+        self.assertEqual(warnings, [])
+        self.assertFalse(header_stale)
+        scan.assert_not_called()  # Normalfall: kein zusaetzlicher Lesedurchlauf
+
+    def test_nur_header_zu_gross_ist_warnung(self):
+        (warnings, header_stale), scan = self._check(_RHONE_2KM, _RHONE_1KM)
+        self.assertTrue(header_stale)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Header veraltet", warnings[0])
+        scan.assert_called_once_with("k.laz", ("X", "Y"))
+
+    def test_punkte_ausserhalb_ist_fehler(self):
+        with self.assertRaisesRegex(ValueError, "Punkte ausserhalb"):
+            self._check(_RHONE_2KM, _RHONE_2KM)
+
+    def test_punktscan_ohne_ergebnis_ist_fehler(self):
+        # Header verdaechtig, Punkte nicht pruefbar -> nie stillschweigend OK
+        with self.assertRaises(ValueError):
+            self._check(_RHONE_2KM, {})
+        with unittest.mock.patch.object(las14, "pdal_dimension_ranges", side_effect=OSError("pdal")):
+            with self.assertRaises(ValueError):
+                las14.check_tile_frame_plausibility(
+                    _frame_meta(_RHONE_2KM), 2672, 1163, _RHONE_NAME, "k.laz")
+
+    def test_migrierte_kachel_mit_veraltetem_header_wird_neu_geschrieben(self):
+        # sonst wuerde sie samt falschem Header nur kopiert
+        def status(header_xy):
+            meta = _las14_target_meta(6, 30)
+            meta["metadata"].update(_frame_meta(header_xy)["metadata"])
+            with unittest.mock.patch.object(las14, "pdal_metadata", return_value=meta), \
+                 unittest.mock.patch.object(las14, "pdal_dimension_ranges", return_value=_RHONE_1KM), \
+                 unittest.mock.patch.object(las14, "log"):
+                return las14.convert_tile(os.path.join("q", _RHONE_NAME), "z", dry_run=True)["status"]
+        self.assertEqual(status(_RHONE_1KM), "skipped_already_migrated")
+        self.assertEqual(status(_RHONE_2KM), "warning")
+
+    def test_punkte_ausserhalb_trotz_passendem_header_ist_fehler(self):
+        # umgekehrter Fall: Header meldet 1 km, Punkte ragen hinaus ->
+        # Nachpruefung gegen die Punkt-Extremwerte aus filters.stats
+        src_meta = _frame_meta(_RHONE_1KM, minor_version=2, dataformat_id=1, global_encoding=1)
+        stats = dict(_RHONE_2KM, Z=(400.0, 500.0), Classification=(1, 1))
+        pipeline_meta = {"stages": {"filters.stats": {"statistic": [
+            {"name": dim, "minimum": lo, "maximum": hi} for dim, (lo, hi) in stats.items()]}}}
+        dst_dir = tempfile.mkdtemp()
+        try:
+            with unittest.mock.patch.object(las14, "pdal_metadata", return_value=src_meta), \
+                 unittest.mock.patch.object(las14, "run_pdal_pipeline", return_value=pipeline_meta), \
+                 unittest.mock.patch.object(las14, "inject_reference_vlrs") as inject:
+                result = las14.convert_tile(os.path.join("q", _RHONE_NAME), dst_dir)
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("Punkte ausserhalb", result["error"])
+            inject.assert_not_called()
+            self.assertEqual(os.listdir(dst_dir), [])  # kein Ziel, keine Temp-Datei
+        finally:
+            shutil.rmtree(dst_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
