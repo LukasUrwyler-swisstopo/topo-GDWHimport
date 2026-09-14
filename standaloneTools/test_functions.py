@@ -1076,8 +1076,9 @@ class TestLas14Zielformat(unittest.TestCase):
 
 # ============================================================
 #  Kachelrahmen-Pruefung (aus Script 4)
-#  Regressionsschutz Vorfall RHONE 2017 (14.9.2026): auf 1 km geclippte
-#  Kacheln meldeten eine 2 km breite Header-BBox -> massgeblich sind die Punkte.
+#  Vorfall RHONE 2017 (14.9.2026): zwei Kacheln mit 2 km breiter BBox - der
+#  Punkt-Scan bestaetigte, dass auch die Punkte 2 km breit sind (Quelle nicht
+#  auf 1 km zugeschnitten) -> harter Fehler (test_punkte_ausserhalb_ist_fehler).
 # ============================================================
 _RHONE_NAME = "2017_RHONE_TIN_raw_2672_1163_LV95_LN02.laz"
 _RHONE_1KM = {"X": (2672000.00, 2672999.99), "Y": (1163000.01, 1163999.99)}

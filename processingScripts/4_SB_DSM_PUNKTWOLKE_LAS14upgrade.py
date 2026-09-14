@@ -22,8 +22,9 @@ Vorgehen pro Tile (siehe Docstrings der einzelnen Funktionen fuer Details):
      aus dem Datenminimum. Plausibilitaetspruefung gegen die Schweizer
      Landesgrenzen (LV95, in km). Kachelrahmen-Pruefung (1x1 km):
      massgeblich sind die tatsaechlichen Punkte, die Header-BBox ist nur
-     Vorfilter (siehe check_tile_frame_plausibility - Vorfall 14.9.2026, Job
-     RHONE 2017: auf 1 km geclippte Kacheln mit 2 km breiter Header-BBox).
+     Vorfilter. Punkte ausserhalb des Rahmens sind ein Datenfehler der
+     Quelle und brechen die Kachel ab, sie werden NICHT zugeschnitten (siehe
+     check_tile_frame_plausibility, Vorfall 14.9.2026, Job RHONE 2017).
   2. Zielformat bestimmen (choose_target_point_format): PF7 nur bei
      keep_rgb=True UND echten RGB-Werten in der Quelle, sonst PF6. RGB-Werte
      bei keep_rgb=False (ADS) sind ein harter Fehler. Die Farbkanaele werden
@@ -354,17 +355,27 @@ def frame_violation(bbox, easting_km, northing_km):
     return None
 
 
+def _points_outside_frame_message(violation):
+    """Fehlermeldung, wenn die Punkte selbst (nicht nur der Header) ueber den
+    Kachelrahmen hinausragen - Datenfehler der Quelle, kein Skriptfehler."""
+    return (f"Punkte ausserhalb des Kachelrahmens: {violation}. Quelldatei ist nicht auf ihre "
+            f"1x1-km-Kachel zugeschnitten oder falsch benannt - Quelle korrigieren (zuschneiden "
+            f"bzw. beim Lieferanten nachfordern), dann Import wiederholen.")
+
+
 def check_tile_frame_plausibility(metadata, easting_km, northing_km, filename, src_path):
     """Vergleicht die Quell-BBox gegen den nominalen 1x1-km-Kachelrahmen.
 
     Massgeblich sind die tatsaechlichen Punkte, die Header-BBox dient nur als
     kostenloser Vorfilter - sie kann veraltet sein (Vorfall RANDA 2020, siehe
-    Modul-Docstring; Vorfall 14.9.2026, Job RHONE 2017: zwei auf 1 km
-    geclippte Kacheln meldeten eine 2 km breite Header-BBox). Erst wenn der
-    Header ueber den Rahmen hinausragt, werden die X/Y-Extremwerte der
-    Punkte gescannt (zusaetzlicher Lesedurchlauf, nur in diesem Fall):
+    Modul-Docstring). Erst wenn der Header ueber den Rahmen hinausragt,
+    werden die X/Y-Extremwerte der Punkte gescannt (zusaetzlicher
+    Lesedurchlauf, nur in diesem Fall):
       - Punkte ausserhalb -> ValueError (harter Fehler: falsch geparste
-        Kachelkoordinaten, fehlplatzierte oder nicht geclippte Datei).
+        Kachelkoordinaten, fehlplatzierte oder nicht geclippte Datei). Bsp.
+        Vorfall 14.9.2026, Job RHONE 2017: 2672_1163 und 2673_1163 enthielten
+        beide Punkte ueber X 2672000-2673999.99 (2 km statt 1 km) - der
+        Punkt-Scan bestaetigte den Header, fehlerhaft war die Quelle.
       - Punkte innerhalb, nur der Header falsch -> Warnung, die Konversion
         laeuft weiter. writers.las berechnet die Ziel-BBox aus den Punkten
         neu, der Ziel-Header ist damit korrigiert (geprueft in
@@ -396,7 +407,7 @@ def check_tile_frame_plausibility(metadata, easting_km, northing_km, filename, s
                              f"Punkt-Pruefung fehlgeschlagen: {e}") from e
         point_violation = frame_violation(bbox, easting_km, northing_km)
         if point_violation:
-            raise ValueError(f"Punkte ausserhalb des Kachelrahmens: {point_violation}.")
+            raise ValueError(_points_outside_frame_message(point_violation))
         header_stale = True
         warnings.append(
             f"{filename}: Header-BBox ragt ueber den Kachelrahmen ({header_violation}), die Punkte "
@@ -884,7 +895,7 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=F
         # Rahmen meldet, die Punkte aber darueber hinausragen.
         point_violation = frame_violation(_xy_bbox(src_ranges), easting_km, northing_km)
         if point_violation:
-            result["error"] = f"Punkte ausserhalb des Kachelrahmens: {point_violation}."
+            result["error"] = _points_outside_frame_message(point_violation)
             return result
 
         stale_header = header_bbox_deviations(src_meta, src_ranges)
