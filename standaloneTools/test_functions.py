@@ -7,6 +7,7 @@ Ausfuehren (aus dem Projekt-Hauptverzeichnis):
     python -m pytest standaloneTools/test_functions.py -v   (falls pytest installiert)
 """
 
+import base64
 import importlib.util
 import inspect
 import os
@@ -996,6 +997,81 @@ class TestLas14PunktValidierung(unittest.TestCase):
         self.assertEqual(las14.dimension_ranges_from_pipeline_metadata(meta),
                          {"Z": (2412.345, 4190.1), "Classification": (1, 6)})
         self.assertEqual(las14.dimension_ranges_from_pipeline_metadata(None), {})
+
+
+# ============================================================
+#  Zielformat PF6/PF7 je nach Farbe und CameraSystem (aus Script 4)
+#  DMC-4: Kacheln mit RGB-Werten -> PF7, ohne -> PF6.
+#  ADS: immer PF6, RGB-Werte = Fehler (ADS liefert nie Farbe).
+# ============================================================
+_RGB = {"Red": (0, 65280), "Green": (256, 65280), "Blue": (0, 60160)}
+_RGB_NULL = {"Red": (0, 0), "Green": (0, 0), "Blue": (0, 0)}
+
+
+def _las14_target_meta(point_format, point_length):
+    """Ziel-Metadaten wie aus 'pdal info --metadata': LAS 1.4, CRS 2056+5728."""
+    return {"metadata": {
+        "count": 100, "minor_version": 4, "dataformat_id": point_format,
+        "point_length": point_length, "header_size": 375, "global_encoding": 17,
+        "vlr_0": {"record_id": 34735, "user_id": "LASF_Projection", "data": ""},
+        "vlr_1": {"record_id": 2112, "user_id": "LASF_Projection",
+                  "data": base64.b64encode(b"COMPOUNDCRS[]\x00").decode("ascii")},
+        "srs": {"json": {"components": [
+            {"type": "ProjectedCRS", "id": {"authority": "EPSG", "code": 2056}},
+            {"type": "VerticalCRS", "id": {"authority": "EPSG", "code": 5728}}]}},
+    }}
+
+
+class TestLas14Zielformat(unittest.TestCase):
+
+    def test_dmc_mit_rgb_wird_pf7(self):
+        self.assertEqual(las14.choose_target_point_format(_RGB, True, "k.laz"), 7)
+
+    def test_dmc_ohne_rgb_wird_pf6(self):
+        # kein Farbfeld (None) und lauter Nullen gelten beide als "keine Farbe"
+        self.assertEqual(las14.choose_target_point_format(None, True, "k.laz"), 6)
+        self.assertEqual(las14.choose_target_point_format(_RGB_NULL, True, "k.laz"), 6)
+
+    def test_ads_ohne_rgb_bleibt_pf6(self):
+        self.assertEqual(las14.choose_target_point_format(None, False, "k.laz"), 6)
+        self.assertEqual(las14.choose_target_point_format(_RGB_NULL, False, "k.laz"), 6)
+
+    def test_ads_mit_rgb_ist_fehler(self):
+        # sonst ginge die Farbe still verloren und die Metadaten nennten die falsche Kamera
+        with self.assertRaises(ValueError):
+            las14.choose_target_point_format(_RGB, False, "k.laz")
+
+    def test_rgb_scan_nur_bei_punktformat_mit_farbfeld(self):
+        with unittest.mock.patch.object(las14, "pdal_dimension_ranges", return_value=_RGB) as scan:
+            for pf in (1, 6):
+                self.assertIsNone(las14.source_rgb_ranges({"metadata": {"dataformat_id": pf}}, "k.laz"))
+            scan.assert_not_called()
+            self.assertEqual(las14.source_rgb_ranges({"metadata": {"dataformat_id": 7}}, "k.laz"), _RGB)
+            scan.assert_called_once_with("k.laz", las14.RGB_DIMENSIONS)
+
+    def test_bereits_migriert_haengt_vom_zielformat_ab(self):
+        pf7 = _las14_target_meta(7, 36)
+        self.assertTrue(las14.is_already_migrated(pf7, 7))
+        self.assertFalse(las14.is_already_migrated(pf7))  # Ziel PF6 -> konvertieren
+
+    def test_validate_target_pf7(self):
+        src = {"metadata": {"count": 100}}
+        self.assertEqual(las14.validate_target(src, _las14_target_meta(7, 36), 7), [])
+        self.assertEqual(las14.validate_target(src, _las14_target_meta(6, 30)), [])
+        # PF6-Datei bei Ziel PF7: dataformat_id und point_length falsch
+        self.assertEqual(len(las14.validate_target(src, _las14_target_meta(6, 30), 7)), 2)
+
+    def test_rgb_muss_unveraendert_bleiben(self):
+        self.assertEqual(las14.validate_rgb_ranges(_RGB, dict(_RGB)), [])
+        problems = las14.validate_rgb_ranges(_RGB, dict(_RGB, Blue=(0, 255)))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Blue veraendert", problems[0])
+        self.assertTrue(las14.validate_rgb_ranges(_RGB, {}))  # fehlende Statistik nie OK
+
+    def test_runner_farbe_nur_bei_dmc4(self):
+        self.assertIn("Leica DMC-4", osgeo_runner.RGB_CAMERA_SYSTEMS)
+        self.assertNotIn("Leica ADS100", osgeo_runner.RGB_CAMERA_SYSTEMS)
+        self.assertNotIn("Leica ADS80", osgeo_runner.RGB_CAMERA_SYSTEMS)
 
 
 if __name__ == "__main__":

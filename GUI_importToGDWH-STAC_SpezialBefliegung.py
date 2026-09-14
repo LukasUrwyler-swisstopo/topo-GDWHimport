@@ -61,6 +61,9 @@ TERRAIN_MODELS = [
     "swissALTI3D", "swissALTI3D/DHM25", "swissSURFACE3D",
 ]
 CAMERA_SYSTEMS = ["Leica ADS100", "Leica ADS80", "Leica DMC-4"]
+# DMC-4: SB_DOP-NoData fix '0 0 0' ohne Vorkorrektur (siehe _update_camera_nodata_rules),
+# Punktwolken mit RGB-Werten als PF7 (siehe Script 4 / _osgeo_runner.RGB_CAMERA_SYSTEMS)
+DMC_CAMERA     = "Leica DMC-4"
 SOURCE_REF_SYS = "(EPSG:2056) CH1903+ / LV95_LN02"
 NODATA_DOP_OPT = ["0 0 0   (schwarz, 8BIT RGB)",     "255 255 255   (weiss, 8BIT RGB)"]
 NODATA_DOP_VAL = ["0 0 0",                            "255 255 255"]
@@ -591,6 +594,10 @@ class SicherheitsCheckDialog(tk.Toplevel):
         if gds == "SB_DSM_PUNKTWOLKE":
             _kv(sec1, "LAS 1.2 -> 1.4 Vorkonversion:",
                 "immer aktiv (CRS-Tag EPSG:2056+5728 wird byte-exakt gesetzt, siehe Log)")
+            _kv(sec1, "Punktformat:",
+                "PF7 mit RGB, PF6 für Kacheln ohne RGB-Werte"
+                if meta.get("CameraSystem") == DMC_CAMERA
+                else "PF6 (ohne RGB, Kachel mit RGB-Werten = Abbruch)")
         _kv(sec1, "CameraSystem:", meta.get("CameraSystem", ""))
 
         # Pfade
@@ -1278,15 +1285,15 @@ class GDWHApp(tk.Tk):
         r += 2
 
         # CameraSystem – bewusst direkt nach Area/vor TileKey/NoData:
-        # bei Leica DMC-4 ist die "fixing false NoData pixels"-Option (siehe
-        # unten) nicht moeglich, die Sichtbarkeit der NoData-Vorkorrektur haengt
-        # also mit von dieser Auswahl ab.
+        # bei Leica DMC-4 ist NoData (SB_DOP) fix '0 0 0' und die "fixing false
+        # NoData pixels"-Option (siehe unten) entfaellt - NoData-Dropdown und
+        # Vorkorrektur haengen also mit von dieser Auswahl ab.
         ttk.Label(sec, text="CameraSystem:", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
         self.camera_var = tk.StringVar(value=CAMERA_SYSTEMS[0])
         ttk.Combobox(sec, textvariable=self.camera_var, values=CAMERA_SYSTEMS,
                       state="readonly", width=20
                       ).grid(row=r, column=1, sticky="w", padx=(8, 0), pady=3)
-        self.camera_var.trace_add("write", lambda *_: self._update_fix_nodata_visibility())
+        self.camera_var.trace_add("write", lambda *_: self._update_camera_nodata_rules())
         r += 1
 
         # TileKey – reine Diagnose-Vorschau (Beispiel aus der ersten Datei),
@@ -1736,9 +1743,9 @@ class GDWHApp(tk.Tk):
             self.check_nodata_btn.grid()
             # Vorkorrektur falsche NoData-Pixel: nur für SB_DOP (Mosaik, 8BIT
             # RGB) sinnvoll, nicht für SB_DOP_16 (Einzellinien, eigene Radiometrie).
-            # Zusaetzlich abhaengig von CameraSystem, siehe
-            # _update_fix_nodata_visibility().
-            self._update_fix_nodata_visibility()
+            # Zusaetzlich abhaengig von CameraSystem (bei DMC-4 auch NoData fix),
+            # siehe _update_camera_nodata_rules().
+            self._update_camera_nodata_rules()
 
         # INPUT_FOLDER (SB_DOP_16) vs. Data-Input Path (andere GDS)
         self.if_frame.grid()         if is_d16 else self.if_frame.grid_remove()
@@ -1766,24 +1773,38 @@ class GDWHApp(tk.Tk):
         self._refresh_area_tilekey_preview()
         self._update_start_btn_state()
 
-    def _update_fix_nodata_visibility(self):
-        """Sichtbarkeit von 'fixing false NoData pixels' (nur ADS100-Radiometrie
-        relevant, siehe Checkbox-Text): ausgeblendet ausser bei GDS SB_DOP UND
-        CameraSystem != Leica DMC-4. Bei DMC-4 wird die Option zusaetzlich aktiv
-        deaktiviert (nicht nur versteckt), falls sie zuvor angehakt war - DMC-4
-        hat eine andere Radiometrie, die Vorkorrektur ist dafuer nicht vorgesehen.
+    def _update_camera_nodata_rules(self):
+        """NoData-Regeln, die vom CameraSystem abhaengen:
+          - 'fixing false NoData pixels' (nur ADS100-Radiometrie relevant, siehe
+            Checkbox-Text): ausgeblendet ausser bei GDS SB_DOP UND CameraSystem
+            != DMC-4. Bei DMC-4 wird die Option zusaetzlich aktiv deaktiviert
+            (nicht nur versteckt), falls sie zuvor angehakt war.
+          - SB_DOP mit DMC-4: NoData immer '0 0 0', Dropdown gesperrt. Die
+            DMC-Pipeline (Reality Studio -> DMC-Converter) schreibt NoData immer
+            schwarz, falsche NoData-Pixel in den Nutzdaten entstehen dort nicht.
         Wird sowohl bei GDS- als auch bei CameraSystem-Wechsel aufgerufen (siehe
-        _on_gds_change bzw. camera_var-Trace in _build_meta)."""
+        _on_gds_change bzw. camera_var-Trace)."""
         if not hasattr(self, "fix_nodata_cb"):
             return
         gds = self.gds_var.get()
-        camera = self.camera_var.get()
-        if gds == "SB_DOP" and camera != "Leica DMC-4":
+        is_dmc = self.camera_var.get() == DMC_CAMERA
+        if gds == "SB_DOP" and not is_dmc:
             self.fix_nodata_cb.grid()
         else:
             self.fix_nodata_cb.grid_remove()
-            if camera == "Leica DMC-4":
+            if is_dmc:
                 self.fix_nodata_var.set(False)
+
+        if gds == "SB_DOP" and is_dmc:
+            self.nodata_var.set(NODATA_DOP_OPT[0])
+            self.nodata_cb.config(state="disabled")
+            self.nodata_auto.config(text="DMC-4: NoData immer '0 0 0' (schwarz), keine Vorkorrektur nötig")
+            self.nodata_auto.grid()
+        else:
+            self.nodata_cb.config(state="readonly")
+            # bei SB_DSM* traegt nodata_auto den Auto-Hinweis (siehe _on_gds_change)
+            if gds in ("SB_DOP", "SB_DOP_16"):
+                self.nodata_auto.grid_remove()
 
     # ── Area / TileKey Live-Vorschau ─────────────────────────────────────────
     _TILEKEY_RE = re.compile(r'^\d{4}_\d{4}$')
@@ -2050,6 +2071,8 @@ class GDWHApp(tk.Tk):
         gds  = self.gds_var.get()
         if gds in ("SB_DSM", "SB_DSM_PUNKTWOLKE"):
             return ""
+        if gds == "SB_DOP" and self.camera_var.get() == DMC_CAMERA:
+            return NODATA_DOP_VAL[0]  # DMC-4: immer '0 0 0', siehe _update_camera_nodata_rules
         val  = self.nodata_var.get()
         opts = NODATA_D16_OPT if gds == "SB_DOP_16" else NODATA_DOP_OPT
         vals = NODATA_D16_VAL if gds == "SB_DOP_16" else NODATA_DOP_VAL
@@ -2078,7 +2101,9 @@ class GDWHApp(tk.Tk):
         if gds != "SB_DSM_PUNKTWOLKE":
             meta["NoData"] = self._get_nodata()
         if gds == "SB_DOP":
-            meta["FixFalseNodata"] = bool(self.fix_nodata_var.get())
+            # DMC-4 nie mit Vorkorrektur, auch falls die Checkbox-Variable noch gesetzt ist
+            meta["FixFalseNodata"] = (bool(self.fix_nodata_var.get())
+                                      and self.camera_var.get() != DMC_CAMERA)
         # Area-Override nur uebernehmen, wenn das Feld einen echten Wert enthaelt
         # (kein Platzhalter wie "—  (Ordner nicht gefunden)") - sonst leitet
         # jedes Sub-Script den Area-Namen wie bisher selbst pro Datei ab.

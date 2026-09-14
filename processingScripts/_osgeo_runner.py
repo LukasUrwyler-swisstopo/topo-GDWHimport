@@ -244,11 +244,21 @@ def _cleanup_staging(job_dir):
 # temporaeren Scratch-Ordner, dessen Pfad als neue proc_quelle fuer Script 1
 # weiterverwendet wird.
 
-def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir):
+# Kamerasysteme mit Farbe in der Punktwolke: Kacheln mit RGB-Werten werden dort
+# als PF7 statt PF6 geschrieben (siehe choose_target_point_format in Script 4).
+# Wert wie in CAMERA_SYSTEMS der GUI.
+RGB_CAMERA_SYSTEMS = ("Leica DMC-4",)
+
+
+def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir, keep_rgb=False):
     """Fuehrt die LAS 1.2 -> LAS 1.4 Batch-Vorkonversion aus (siehe
     convert_folder() in Script 4). Bricht den ganzen Lauf per Exception ab,
     wenn auch nur eine Kachel fehlschlaegt - eine nicht korrekt konvertierte
     Punktwolke soll nicht unbemerkt weiter nach GDWH gelangen.
+
+    keep_rgb=True (CameraSystem in RGB_CAMERA_SYSTEMS): Kacheln mit RGB-Werten
+    werden PF7, ohne RGB-Werte PF6. keep_rgb=False (ADS): immer PF6, eine
+    Kachel mit RGB-Werten schlaegt fehl und bricht damit den Lauf ab.
 
     Der Scratch-Ordner fuer die konvertierten Tiles liegt innerhalb
     staging_root_dir (i.d.R. job_dir - selbe schnelle lokale Platte wie die
@@ -261,11 +271,14 @@ def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir):
     scratch_dir = tempfile.mkdtemp(prefix="SB_DSM_PUNKTWOLKE_LAS14_", dir=(staging_root_dir or None))
 
     print("\n=== LAS 1.2 -> LAS 1.4 Vorkonversion (Script 4) ===\n", flush=True)
+    print("Zielformat: " + ("PF7 fuer Kacheln mit RGB-Werten, sonst PF6 (CameraSystem mit Farbe)"
+                            if keep_rgb else "PF6 (RGB-Werte in einer Kachel = Abbruch)") + "\n",
+          flush=True)
     summary = mod4.convert_folder(quelle_dir, scratch_dir, recursive=False,
-                                   target_scale=0.01, dry_run=False)
+                                   target_scale=0.01, dry_run=False, keep_rgb=keep_rgb)
     print(f"\nLAS14-Vorkonversion: {summary['total']} verarbeitet, {summary['ok']} gueltig, "
           f"{summary['warning']} mit Warnung, {summary['skipped']} bereits migriert, "
-          f"{summary['failed']} fehlgeschlagen\n", flush=True)
+          f"{summary['failed']} fehlgeschlagen; davon PF7 mit RGB: {summary['pf7']}\n", flush=True)
 
     if summary["failed"] > 0:
         raise RuntimeError(
@@ -320,7 +333,8 @@ def main():
             # mit den konvertierten Tiles umgebogen.
             if gds == "SB_DSM_PUNKTWOLKE":
                 punktwolke_scratch_dir = _convert_punktwolke_las14(
-                    cfg["script_4"], proc_quelle, job_dir)
+                    cfg["script_4"], proc_quelle, job_dir,
+                    keep_rgb=meta.get("CameraSystem") in RGB_CAMERA_SYSTEMS)
                 proc_quelle = punktwolke_scratch_dir
 
             # Script 1 (SB_DOP / SB_DSM / SB_DSM_PUNKTWOLKE)

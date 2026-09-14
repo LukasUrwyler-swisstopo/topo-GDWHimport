@@ -9,7 +9,11 @@ abgeleitete DSM-Punktwolken aus Autokorrelation, ADS100-Luftbildstreifen).
 Hebt die Quell-Tiles von LAS 1.2 (Point Data Record Format 1, keine CRS-
 Angabe im Header) auf LAS 1.4 (Point Data Record Format 6, CRS-Tag LV95/LN02)
 an, damit sie strukturell kongruent zu swissSURFACE3D sind und in den GDWH
-importiert werden koennen. Laeuft VOR dem eigentlichen GDWH-Import
+importiert werden koennen. Einzige Abweichung: Kacheln mit echten RGB-Werten
+aus einem Kamerasystem mit Farbe (Leica DMC-4, keep_rgb=True bzw. --keep-rgb)
+werden als PF7 (= PF6 + RGB) geschrieben, damit die Farbe bis ins GDWH-Produkt
+erhalten bleibt (siehe choose_target_point_format). Laeuft VOR dem
+eigentlichen GDWH-Import
 (1_allGDS_upload_GDWH_withCHECKxml.py); dieses Skript schreibt ausschliesslich
 in ein separates Zielverzeichnis, die Quelldateien bleiben unveraendert.
 
@@ -17,13 +21,19 @@ Vorgehen pro Tile (siehe Docstrings der einzelnen Funktionen fuer Details):
   1. Kachelursprung deterministisch aus dem Dateinamen parsen (Regex), NICHT
      aus dem Datenminimum. Plausibilitaetspruefung gegen die Schweizer
      Landesgrenzen (LV95, in km).
-  2. Bereits migrierte Tiles (LAS 1.4/PF6, CRS korrekt, global_encoding 17)
-     werden erkannt und nur unveraendert kopiert, nicht nochmal konvertiert.
-  3. PDAL-Pipeline (subprocess, siehe _find_pdal_exe): Scale 0.001 -> 0.01,
-     Offset Datenminimum -> Kachelursprung, LAS 1.4/PF6, global_encoding 17.
+  2. Zielformat bestimmen (choose_target_point_format): PF7 nur bei
+     keep_rgb=True UND echten RGB-Werten in der Quelle, sonst PF6. RGB-Werte
+     bei keep_rgb=False (ADS) sind ein harter Fehler. Die Farbkanaele werden
+     nur gescannt, wenn das Punktformat der Quelle ueberhaupt RGB fuehrt.
+  3. Bereits migrierte Tiles (LAS 1.4 im Zielformat, CRS korrekt,
+     global_encoding 17) werden erkannt und nur unveraendert kopiert, nicht
+     nochmal konvertiert.
+  4. PDAL-Pipeline (subprocess, siehe _find_pdal_exe): Scale 0.001 -> 0.01,
+     Offset Datenminimum -> Kachelursprung, LAS 1.4/PF6 bzw. PF7,
+     global_encoding 17.
      KEINE Reprojektion (kein filters.reprojection) - nur Requantisierung,
      die Koordinatenwerte aendern sich ausser durch die Scale-Rundung nicht.
-  4. CRS-Tag: KEIN a_srs auf writers.las und KEIN las2las -epsg/-set_ogc_wkt.
+  5. CRS-Tag: KEIN a_srs auf writers.las und KEIN las2las -epsg/-set_ogc_wkt.
      Stattdessen werden die zwei VLRs (GeoTIFF-KeyDirectory record_id 34735 +
      OGC-WKT record_id 2112) byte-exakt aus einer verifizierten
      swissSURFACE3D-Referenzkachel injiziert (inject_reference_vlrs).
@@ -49,8 +59,9 @@ Vorgehen pro Tile (siehe Docstrings der einzelnen Funktionen fuer Details):
          das anfordert) - inject_reference_vlrs() entfernt eine solche
          uebernommene VLR deshalb, statt abzubrechen (siehe dortiger
          Docstring).
-  5. Vollstaendige Nachkonversions-Validierung (siehe validate_target und
-     validate_point_ranges). Die BBox wird dabei gegen die tatsaechlichen
+  6. Vollstaendige Nachkonversions-Validierung (siehe validate_target,
+     validate_point_ranges und bei PF7 validate_rgb_ranges - RGB muss
+     unveraendert bleiben). Die BBox wird dabei gegen die tatsaechlichen
      Punkt-Extremwerte der Quelle geprueft, NICHT gegen deren Header-BBox:
      manche Quell-Batches (z.B. Job RANDA 2020, Vorfall 10.9.2026) haben
      eine Header-BBox, die nicht zu den eigenen Punkten passt (Z bis 2.3 cm
@@ -70,6 +81,9 @@ Verwendung (aus dem Projekt-Hauptverzeichnis):
 
   Batch, rekursiv (alle Unterordner nach .laz durchsuchen):
     python processingScripts\4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py --input-dir Q:\...\input --output-dir Q:\...\output --recursive
+
+  DMC-4-Lieferung (Kacheln mit RGB-Werten -> PF7, ohne RGB-Werte -> PF6):
+    python processingScripts\4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py --input-dir Q:\...\input --output-dir Q:\...\output --keep-rgb
 
   Kacheln werden standardmaessig parallel verarbeitet (siehe
   _default_worker_count: Kernanzahl - 2, max. 8). Fuer seriellen Ablauf
@@ -109,8 +123,9 @@ def log(message):
 
 # ****************************** Zielwerte / Konstanten ******************************
 TARGET_MINOR_VERSION = 4
-TARGET_POINT_FORMAT = 6
-TARGET_POINT_LENGTH = 30
+TARGET_POINT_FORMAT = 6        # Standard, farblos (wie swissSURFACE3D)
+TARGET_POINT_FORMAT_RGB = 7    # PF6 + RGB, nur bei keep_rgb (DMC-4), siehe choose_target_point_format
+TARGET_POINT_LENGTHS = {TARGET_POINT_FORMAT: 30, TARGET_POINT_FORMAT_RGB: 36}
 TARGET_HEADER_SIZE = 375
 TARGET_GLOBAL_ENCODING = 17  # Bit 0 (Adjusted Standard GPS Time) + Bit 4 (WKT)
 BBOX_TOLERANCE_M = 0.01  # 1 cm, siehe Anforderung
@@ -120,6 +135,11 @@ STATS_DIMENSIONS = ("X", "Y", "Z", "Classification")
 # Header-BBox-Feld -> (Dimension, Index in (minimum, maximum))
 BBOX_FIELDS = (("minx", "X", 0), ("maxx", "X", 1), ("miny", "Y", 0),
                ("maxy", "Y", 1), ("minz", "Z", 0), ("maxz", "Z", 1))
+
+# Point Data Record Formats mit RGB-Feldern (LAS 1.4 R15). Headerbasiert, also
+# ohne Punkt-Scan entscheidbar, ob eine Quelle ueberhaupt Farbe haben KANN.
+POINT_FORMATS_WITH_RGB = (2, 3, 5, 7, 8, 10)
+RGB_DIMENSIONS = ("Red", "Green", "Blue")
 
 # Kachelname-Muster: "..._<easting_km>_<northing_km>_LV95_LN02.laz"
 # Bsp: 2025_BIRCH_BLATTEN_TIN_..._2623_1138_LV95_LN02.laz -> (2623, 1138)
@@ -368,18 +388,61 @@ def resolve_crs_epsg(metadata):
     return horizontal_epsg, vertical_epsg
 
 
-def is_already_migrated(metadata):
-    """True, wenn die Datei bereits LAS 1.4/PF6 mit korrektem CRS (2056+5728)
+def is_already_migrated(metadata, point_format=TARGET_POINT_FORMAT):
+    """True, wenn die Datei bereits LAS 1.4 im Zielformat point_format (PF6
+    bzw. PF7, siehe choose_target_point_format) mit korrektem CRS (2056+5728)
     und global_encoding 17 ist - dann muss NICHT nochmal konvertiert werden."""
     md = metadata.get("metadata") or {}
     if md.get("minor_version") != TARGET_MINOR_VERSION:
         return False
-    if md.get("dataformat_id") != TARGET_POINT_FORMAT:
+    if md.get("dataformat_id") != point_format:
         return False
     if md.get("global_encoding") != TARGET_GLOBAL_ENCODING:
         return False
     h_epsg, v_epsg = resolve_crs_epsg(metadata)
     return h_epsg == 2056 and v_epsg == 5728
+
+
+# ****************************** Farbe / Zielformat ******************************
+def source_rgb_ranges(metadata, file_path):
+    """Min/Max der Farbkanaele der Quelle als {dimension: (minimum, maximum)},
+    oder None, wenn das Punktformat gar kein RGB-Feld fuehrt. Das entscheidet
+    der Header (dataformat_id) ohne Punkt-Scan - bei ADS-Quellen (PF1) kostet
+    die Pruefung also nichts. Nur bei Formaten mit Farbfeld werden die drei
+    Kanaele gescannt: ob dort echte Werte oder lauter Nullen stehen, zeigt
+    erst der Inhalt."""
+    md = metadata.get("metadata") or {}
+    if md.get("dataformat_id") not in POINT_FORMATS_WITH_RGB:
+        return None
+    return pdal_dimension_ranges(file_path, RGB_DIMENSIONS)
+
+
+def has_rgb_values(rgb_ranges):
+    """True, wenn mindestens ein Farbkanal einen Wert > 0 fuehrt. None (kein
+    Farbfeld) oder lauter Nullen bedeuten: keine Farbe."""
+    if not rgb_ranges:
+        return False
+    return any((rgb_ranges.get(dim) or (None, None))[1] not in (None, 0)
+               for dim in RGB_DIMENSIONS)
+
+
+def choose_target_point_format(rgb_ranges, keep_rgb, filename):
+    """Zielformat einer Kachel:
+      - keine RGB-Werte (kein Farbfeld oder lauter Nullen) -> PF6
+      - RGB-Werte und keep_rgb=True (CameraSystem DMC-4)   -> PF7
+      - RGB-Werte und keep_rgb=False (ADS)                 -> ValueError
+    ADS liefert nie Farbe. Fuehrt eine Kachel trotzdem RGB-Werte, stammt sie
+    vermutlich aus einem DMC-Auftrag und das CameraSystem im GUI ist falsch
+    gewaehlt - ohne Abbruch ginge die Farbe still verloren und die Metadaten
+    nennten die falsche Kamera."""
+    if not has_rgb_values(rgb_ranges):
+        return TARGET_POINT_FORMAT
+    if keep_rgb:
+        return TARGET_POINT_FORMAT_RGB
+    raise ValueError(
+        f"{filename}: Quelle fuehrt RGB-Werte, das CameraSystem ist aber ohne Farbe "
+        f"(ADS liefert nie RGB) - CameraSystem pruefen (DMC-4?)."
+    )
 
 
 # ****************************** VLR-Byte-Injektion ******************************
@@ -490,12 +553,13 @@ def inject_reference_vlrs(las_path):
 
 
 # ****************************** Validierung Quelle vs. Ziel ******************************
-def validate_target(src_metadata, dst_metadata):
+def validate_target(src_metadata, dst_metadata, point_format=TARGET_POINT_FORMAT):
     """Nachkonversions-Validierung der Header-/CRS-Angaben (BBox und
     Classification separat, siehe validate_point_ranges). Gibt eine Liste
     von Fehler-Strings zurueck (leer = alles OK). Prueft NUR (keine Reparatur):
       - Punktanzahl identisch
-      - minor_version==4, dataformat_id==6, point_length==30, header_size==375
+      - minor_version==4, dataformat_id==point_format, point_length passend
+        dazu (PF6: 30, PF7: 36), header_size==375
       - global_encoding==17
       - beide CRS-VLRs vorhanden (record_id 34735 und 2112), VLR 2112 endet
         auf Nullbyte
@@ -512,10 +576,11 @@ def validate_target(src_metadata, dst_metadata):
 
     if dst_md.get("minor_version") != TARGET_MINOR_VERSION:
         problems.append(f"minor_version={dst_md.get('minor_version')}, erwartet {TARGET_MINOR_VERSION}")
-    if dst_md.get("dataformat_id") != TARGET_POINT_FORMAT:
-        problems.append(f"dataformat_id={dst_md.get('dataformat_id')}, erwartet {TARGET_POINT_FORMAT}")
-    if dst_md.get("point_length") != TARGET_POINT_LENGTH:
-        problems.append(f"point_length={dst_md.get('point_length')}, erwartet {TARGET_POINT_LENGTH}")
+    if dst_md.get("dataformat_id") != point_format:
+        problems.append(f"dataformat_id={dst_md.get('dataformat_id')}, erwartet {point_format}")
+    expected_length = TARGET_POINT_LENGTHS[point_format]
+    if dst_md.get("point_length") != expected_length:
+        problems.append(f"point_length={dst_md.get('point_length')}, erwartet {expected_length}")
     if dst_md.get("header_size") != TARGET_HEADER_SIZE:
         problems.append(f"header_size={dst_md.get('header_size')}, erwartet {TARGET_HEADER_SIZE}")
     if dst_md.get("global_encoding") != TARGET_GLOBAL_ENCODING:
@@ -619,18 +684,37 @@ def validate_point_ranges(src_ranges, dst_ranges, dst_metadata):
     return problems
 
 
+def validate_rgb_ranges(src_rgb, dst_rgb):
+    """Nur bei Ziel PF7: Min/Max je Farbkanal muessen exakt der Quelle
+    entsprechen - RGB wird (anders als X/Y/Z) nicht requantisiert, jede
+    Abweichung ist ein Konversionsfehler. Gibt eine Liste von Fehler-Strings
+    zurueck (leer = OK)."""
+    problems = []
+    for dim in RGB_DIMENSIONS:
+        src, dst = (src_rgb or {}).get(dim), (dst_rgb or {}).get(dim)
+        if not src or not dst or None in tuple(src) + tuple(dst):
+            problems.append(f"{dim}-Statistik fehlt in Quelle oder Ziel.")
+        elif tuple(src) != tuple(dst):
+            problems.append(f"{dim} veraendert: Quelle min/max={src[0]}/{src[1]}, "
+                            f"Ziel min/max={dst[0]}/{dst[1]}")
+    return problems
+
+
 # ****************************** Kernkonversion pro Tile ******************************
-def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False):
+def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=False):
     """Konvertiert eine einzelne Tile. Gibt ein Ergebnis-Dict zurueck:
       {"status": "ok" | "skipped_already_migrated" | "warning" | "failed",
-       "warnings": [...], "error": str oder None}
+       "warnings": [...], "error": str oder None,
+       "point_format": 6 | 7 | None (None = vor der Formatwahl gescheitert)}
+    keep_rgb=True (CameraSystem mit Farbe, DMC-4): Kacheln mit RGB-Werten
+    werden PF7, sonst PF6 - siehe choose_target_point_format.
     Original wird NIE veraendert. Ziel wird nur bei vollstaendigem Erfolg
     atomar geschrieben (os.replace) - bei jedem Fehler bleibt eine evtl.
     vorhandene Zieldatei unangetastet.
     """
     name = os.path.basename(src_path)
     dst_path = os.path.join(dst_dir, name)
-    result = {"status": "failed", "warnings": [], "error": None}
+    result = {"status": "failed", "warnings": [], "error": None, "point_format": None}
 
     try:
         easting_km, northing_km = parse_tile_from_filename(name)
@@ -658,7 +742,23 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False):
             f"Quelle NICHT gesetzt - Annahme ueber den GpsTime-Typ koennte nicht zutreffen."
         )
 
-    if is_already_migrated(src_meta):
+    try:
+        src_rgb = source_rgb_ranges(src_meta, src_path)
+    except Exception as e:
+        result["error"] = f"RGB-Statistik der Quelle nicht lesbar: {e}"
+        return result
+    try:
+        point_format = choose_target_point_format(src_rgb, keep_rgb, name)
+    except ValueError as e:
+        result["error"] = str(e)
+        return result
+    result["point_format"] = point_format
+    if keep_rgb and point_format == TARGET_POINT_FORMAT:
+        result["warnings"].append(
+            f"{name}: CameraSystem mit Farbe gewaehlt, die Quelle fuehrt aber keine "
+            f"RGB-Werte - Ziel PF{TARGET_POINT_FORMAT} (ohne Farbe).")
+
+    if is_already_migrated(src_meta, point_format):
         # KEIN direkter log()-Aufruf hier (anders als frueher): convert_tile
         # laeuft unter workers>1 parallel in mehreren Threads (siehe
         # convert_folder), log() soll aber ausschliesslich seriell aus dem
@@ -673,7 +773,7 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False):
     offset_x, offset_y, offset_z = easting_km * 1000, northing_km * 1000, 0
 
     if dry_run:
-        log(f"{name}: [DRY-RUN] wuerde konvertieren -> Offset ({offset_x},{offset_y},{offset_z}), "
+        log(f"{name}: [DRY-RUN] wuerde konvertieren -> PF{point_format}, Offset ({offset_x},{offset_y},{offset_z}), "
             f"Scale {target_scale}, Ziel: {dst_path}")
         result["status"] = "warning" if result["warnings"] else "ok"
         return result
@@ -690,7 +790,7 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False):
             "type": "writers.las",
             "filename": tmp_path,
             "minor_version": TARGET_MINOR_VERSION,
-            "dataformat_id": TARGET_POINT_FORMAT,
+            "dataformat_id": point_format,
             "scale_x": target_scale,
             "scale_y": target_scale,
             "scale_z": target_scale,
@@ -741,13 +841,18 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False):
             )
 
         dst_meta = pdal_metadata(tmp_path)
-        problems = validate_target(src_meta, dst_meta)
+        problems = validate_target(src_meta, dst_meta, point_format)
+        # Bei PF7 die Farbkanaele im selben Ziel-Scan mitmessen (kein zweiter Durchlauf)
+        with_rgb = point_format == TARGET_POINT_FORMAT_RGB
+        dst_dims = STATS_DIMENSIONS + (RGB_DIMENSIONS if with_rgb else ())
         try:
-            dst_ranges = pdal_dimension_ranges(tmp_path)
+            dst_ranges = pdal_dimension_ranges(tmp_path, dst_dims)
         except Exception as e:
             problems.append(f"Statistik-Ermittlung (Ziel) fehlgeschlagen: {e}")
         else:
             problems.extend(validate_point_ranges(src_ranges, dst_ranges, dst_meta))
+            if with_rgb:
+                problems.extend(validate_rgb_ranges(src_rgb, dst_ranges))
 
         if problems:
             result["error"] = "; ".join(problems)
@@ -795,23 +900,27 @@ def _log_tile_result(name, result, summary):
     for w in result["warnings"]:
         log(f"  [WARNUNG] {w}")
 
+    pf = result.get("point_format")
     if result["status"] == "skipped_already_migrated":
-        log(f"  bereits LAS 1.4/PF6 mit korrektem CRS - wird unveraendert kopiert.")
+        log(f"  bereits LAS 1.4/PF{pf} mit korrektem CRS - wird unveraendert kopiert.")
         summary["skipped"] += 1
     elif result["status"] == "ok":
-        log(f"  OK")
+        log(f"  OK (PF{pf})")
         summary["ok"] += 1
     elif result["status"] == "warning":
-        log(f"  OK (mit Warnung)")
+        log(f"  OK (PF{pf}, mit Warnung)")
         summary["warning"] += 1
     else:
         log(f"  FEHLER: {result['error']}")
         summary["failed"] += 1
         summary["failed_files"].append((name, result["error"]))
+        return
+    if pf == TARGET_POINT_FORMAT_RGB:
+        summary["pf7"] += 1
 
 
 def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
-                    dry_run=False, workers=None):
+                    dry_run=False, workers=None, keep_rgb=False):
     """Batch-Konversion aller .laz-Dateien in input_dir - wiederverwendbare
     Kernfunktion, sowohl fuer die CLI (main(), siehe unten) als auch fuer den
     Aufruf als Modul (siehe _osgeo_runner.py: laeuft dort IMMER automatisch
@@ -837,13 +946,19 @@ def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
     mehrere pdal.exe-Prozesse echt parallel auf mehreren Kernen laufen
     koennen, ganz ohne das Pickling-/Modul-Identitaetsproblem.
 
+    keep_rgb=True, wenn im GUI ein CameraSystem mit Farbe gewaehlt ist
+    (DMC-4): Kacheln mit RGB-Werten werden PF7, ohne RGB-Werte PF6. Bei
+    keep_rgb=False (ADS) sind RGB-Werte in einer Kachel ein Fehler, siehe
+    choose_target_point_format.
+
     Gibt ein Zusammenfassungs-Dict zurueck:
       {"total", "ok", "warning", "skipped", "failed",
+       "pf7" (davon erfolgreich als PF7 mit RGB),
        "failed_files": [(name, error), ...]}
     """
     files = list(find_laz_files(input_dir, recursive))
     summary = {"total": len(files), "ok": 0, "warning": 0, "skipped": 0,
-               "failed": 0, "failed_files": []}
+               "failed": 0, "pf7": 0, "failed_files": []}
 
     if not files:
         return summary
@@ -855,7 +970,8 @@ def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
     if workers <= 1:
         for src_path in files:
             name = os.path.basename(src_path)
-            result = convert_tile(src_path, output_dir, target_scale=target_scale, dry_run=dry_run)
+            result = convert_tile(src_path, output_dir, target_scale=target_scale,
+                                  dry_run=dry_run, keep_rgb=keep_rgb)
             _log_tile_result(name, result, summary)
     else:
         log(f"Parallelisierung: {workers} gleichzeitige PDAL-Worker "
@@ -863,7 +979,7 @@ def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_name = {
                 executor.submit(convert_tile, src_path, output_dir,
-                                 target_scale, dry_run): os.path.basename(src_path)
+                                 target_scale, dry_run, keep_rgb): os.path.basename(src_path)
                 for src_path in files
             }
             for future in as_completed(future_to_name):
@@ -877,7 +993,8 @@ def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
 
     log(f"\n=== Zusammenfassung: {summary['total']} verarbeitet, "
         f"{summary['ok']} gueltig, {summary['warning']} mit Warnung, "
-        f"{summary['skipped']} bereits migriert (kopiert), {summary['failed']} fehlgeschlagen ===")
+        f"{summary['skipped']} bereits migriert (kopiert), {summary['failed']} fehlgeschlagen; "
+        f"davon PF7 mit RGB: {summary['pf7']} ===")
 
     if summary["failed_files"]:
         log("\nFehlgeschlagene Dateien:")
@@ -900,6 +1017,10 @@ def main():
                          help="Ziel-Scale in Metern (Default 0.01 = 1 cm, verlustbehaftete Rundung "
                               "gegenueber der Quelle mit Scale 0.001, siehe Modul-Docstring)")
     parser.add_argument("--log-file", help="Pfad fuer die Log-Datei (Default: <output-dir>/logs/...)")
+    parser.add_argument("--keep-rgb", action="store_true",
+                         help="CameraSystem mit Farbe (Leica DMC-4): Kacheln mit RGB-Werten als PF7 "
+                              "schreiben, ohne RGB-Werte als PF6. Ohne diese Option immer PF6, "
+                              "RGB-Werte in einer Kachel sind dann ein Fehler (ADS liefert nie Farbe).")
     parser.add_argument("--workers", type=int, default=None,
                          help="Anzahl gleichzeitig verarbeiteter Kacheln (Default: automatisch, "
                               "siehe _default_worker_count - reserviert 2 Kerne, max. 8). "
@@ -929,6 +1050,7 @@ def main():
     log(f"Input:  {args.input_dir}  (rekursiv: {args.recursive})")
     log(f"Output: {args.output_dir}")
     log(f"Ziel-Scale: {args.target_scale} m  (Quelle: 0.001 m - verlustbehaftete Rundung, siehe Docstring)")
+    log(f"Farbe: {'PF7 fuer Kacheln mit RGB-Werten, sonst PF6 (--keep-rgb)' if args.keep_rgb else 'PF6, RGB-Werte in einer Kachel = Fehler'}")
     log(f"Dry-Run: {args.dry_run}")
     log(f"Worker: {args.workers if args.workers else f'automatisch ({_default_worker_count()} von {os.cpu_count()} Kernen)'}\n")
 
@@ -938,7 +1060,7 @@ def main():
 
     summary = convert_folder(args.input_dir, args.output_dir, recursive=args.recursive,
                               target_scale=args.target_scale, dry_run=args.dry_run,
-                              workers=args.workers)
+                              workers=args.workers, keep_rgb=args.keep_rgb)
 
     if _log_file_handle:
         _log_file_handle.close()

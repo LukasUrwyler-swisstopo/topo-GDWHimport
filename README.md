@@ -28,7 +28,7 @@ Alle Angaben (GDS, Pfade, Meta-Informationen) werden direkt im GUI ausgefüllt �
 - **NoData-Tag & Maske** im TIFF setzen
 - **Daten ins GDWH-Bucket kopieren** inkl. `files.csv` (Hash, TileKey, Footprint)
 - Optionale Zusatzfunktion (siehe unten): falsche NoData-Pixel korrigieren
-- Bei `SB_DSM_PUNKTWOLKE` läuft vor dem Import automatisch eine LAS 1.2 → 1.4 Vorkonversion (CRS-Tag wird dabei byte-exakt gesetzt)
+- Bei `SB_DSM_PUNKTWOLKE`: automatische LAS-1.4-Vorkonversion vor dem Import (CRS-Tag byte-exakt; Punktformat PF6, bei `Leica DMC-4` mit Farbe PF7)
 
 Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 
@@ -40,10 +40,10 @@ Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 |-----|-------------|--------------------|
 | `SB_DOP` | `.tif` / `.tfw` (8Bit RGB) | `202X_AREA_DOP_..._XXXX_YYYY_LV95.tif` |
 | `SB_DOP_16` | `.tif` / `.tfw` (16Bit NRGB) | `202X_AREA_DOP_..._XXXX_YYYY_LV95.tif` |
-| `SB_DSM` | `.tif` / `.tfw` (DSM + Hillshade) | `202X_AREA_DSM_..._LV95_LN02.tif` |
-| `SB_DSM_PUNKTWOLKE` | `.laz` | `202X_AREA_TIN_..._XXXX_YYYY_LV95_LN02.laz` |
+| `SB_DSM` | `.tif` / `.tfw` (DSM + Hillshade) | `202X_AREA_DSM_..._LV95_LN02.tif` bzw. `202X_AREA_hillshade_..._LV95_LN02.tif` |
+| `SB_DSM_PUNKTWOLKE` | `.laz` (LAS 1.4, PF6 bzw. PF7 bei DMC-4) | `202X_AREA_TIN_..._XXXX_YYYY_LV95_LN02.laz` |
 
-> `XXXX_YYYY` = TileKey (z.B. `2601_1136`). `_LV95` muss im Dateinamen enthalten sein – das GUI zeigt eine Live-Vorschau und warnt bei falschem Format.
+> `XXXX_YYYY` = TileKey (z.B. `2601_1136`). `_LV95` muss im Dateinamen enthalten sein. Das GUI zeigt den TileKey der ersten Datei als Vorschau (mit Warnhinweis, wenn er nicht passt); der Button **Check - NameFormat** prüft alle Dateinamen im Quellordner.
 
 ---
 
@@ -56,10 +56,10 @@ Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 4. Quell- und Zielpfad eingeben
 5. Sicherheitscheck bestätigen  (Kontrollfragen)
 6. Import starten
-   → (nur SB_DSM_PUNKTWOLKE: LAS 1.2 → 1.4 Vorkonversion, automatisch)
+   → (nur SB_DSM_PUNKTWOLKE: LAS-1.4-Vorkonversion, automatisch)
    → Quellordner bereinigen
    → XML generieren
-   → NoData-Tag & Maske setzen
+   → NoData-Tag & Maske setzen  (nur Raster)
    → Daten ins Bucket kopieren + files.csv erstellen
 7. GDWH-Portal: Datenpaket prüfen (CHECK) und importieren
 8. STAC-Import läuft automatisch
@@ -77,21 +77,34 @@ Der **Import-Button** bleibt gesperrt, bis alle Pflichtfelder ausgefüllt sind.
 | `Area` | AOI-Name, wird aus dem Quellordner vorgeschlagen, ist aber editierbar |
 | `NoData` | NoData-Quellwert (bestimmt v.a. bei SB_DOP/SB_DOP_16 die Maskenberechnung) |
 | `TerrainModel` | verwendetes Geländemodell |
-| `CameraSystem` | Kamerasystem (z.B. Leica ADS100) |
+| `CameraSystem` | Kamerasystem (Leica ADS100 / ADS80 / DMC-4). Bei DMC-4 gelten Sonderregeln, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln) |
 | `CustomAttribute` | Beschreibung des Datenprodukts |
 | `Line_ID(s)` | Befliegungslinien – werden automatisch chronologisch sortiert; mehrere Zeilen per Copy/Paste aus Excel möglich |
 
-> Bei `SB_DSM` wird NoData automatisch gesetzt, bei `SB_DSM_PUNKTWOLKE` entfällt es ganz.
+> Bei `SB_DSM` wird NoData automatisch gesetzt, bei `SB_DSM_PUNKTWOLKE` entfällt es ganz. Bei `SB_DOP` mit `Leica DMC-4` ist es fix `0 0 0`.
+
+---
+
+## Leica DMC-4: Sonderregeln
+
+Ist im GUI `CameraSystem` = `Leica DMC-4` gewählt, gilt:
+
+| GDS | Verhalten | Grund |
+|-----|-----------|-------|
+| `SB_DOP` | NoData immer `0 0 0` (Dropdown gesperrt), Option „fixing false NoData pixels“ ausgeblendet und aus | Die DMC-Pipeline (Reality Studio → `topo-DMCdataConverter`) schreibt NoData immer schwarz und erzeugt keine falschen NoData-Pixel in den Nutzdaten. |
+| `SB_DSM_PUNKTWOLKE` | Kacheln mit RGB-Werten → **PF7** (PF6 + RGB), Kacheln ohne RGB-Werte → PF6 | Die Farbe der DMC-Punktwolke soll bis ins GDWH-Produkt erhalten bleiben. |
+
+Bei ADS (ADS100 / ADS80) gilt: NoData frei wählbar, Vorkorrektur optional, Punktwolken immer PF6. Enthält eine Punktwolken-Kachel trotzdem RGB-Werte, bricht der Import ab – ADS liefert nie Farbe, das `CameraSystem` ist dann vermutlich falsch gewählt. `SB_DOP_16` (ADS-Einzellinien) ist von beidem nicht betroffen.
 
 ---
 
 ## Optionale Zusatzfunktionen
 
-**Falsche NoData-Pixel korrigieren** *(nur SB_DOP, Checkbox, standardmässig aktiv)*
-Vereinzelte Pixel/kleine Gruppen, die zufällig dem NoData-Wert entsprechen (z.B. dunkle Schatten, überstrahlte Flächen), aber eigentlich gültige Nutzdaten sind, werden vor dem Import erkannt und korrigiert, damit sie nicht fälschlich als NoData maskiert werden.
+**Falsche NoData-Pixel korrigieren** *(nur SB_DOP mit ADS, Checkbox, standardmässig aus)*
+Vereinzelte Pixel/kleine Gruppen, die zufällig dem NoData-Wert entsprechen (z.B. dunkle Schatten, überstrahlte Flächen), aber eigentlich gültige Nutzdaten sind, werden vor dem Import erkannt und korrigiert, damit sie nicht fälschlich als NoData maskiert werden. Je nach DOP-Grösse dauert das einige Zeit; die Checkbox wird nach jedem erfolgreichen Import wieder zurückgesetzt.
 
-**LAS 1.2 → 1.4 Vorkonversion** *(nur SB_DSM_PUNKTWOLKE, immer aktiv, keine Checkbox)*
-Hebt die photogrammetrisch abgeleiteten DSM-Punktwolken-Tiles (LAZ) von LAS 1.2/PF1 ohne CRS-Angabe auf LAS 1.4/PF6 an, damit sie strukturell kongruent zu swissSURFACE3D sind. Das CRS (`EPSG:2056+5728`) wird dabei byte-exakt aus einer verifizierten Referenzkachel injiziert (keine Reprojektion, keine Neuberechnung des WKT). Läuft automatisch vor dem eigentlichen Import auf einer Arbeitskopie; Quelltiles bleiben unverändert. Details siehe [4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py](processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py).
+**LAS-1.4-Vorkonversion** *(nur SB_DSM_PUNKTWOLKE, immer aktiv, keine Checkbox)*
+Bringt die Punktwolken-Kacheln (LAZ) vor dem Import ins GDWH-Format: LAS 1.4, PF6 (bzw. PF7 bei DMC-4 mit Farbe, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln)), Scale 0.01, Offset = Kachelursprung, CRS `EPSG:2056+5728` – strukturell kongruent zu swissSURFACE3D. Das CRS wird byte-exakt aus einer verifizierten Referenzkachel injiziert (keine Reprojektion, keine Neuberechnung des WKT). Typischer Fall sind ADS-Kacheln in LAS 1.2/PF1 ohne CRS-Angabe; Kacheln, die schon im Zielformat vorliegen (z.B. die fertigen `…_LV95_LN02.laz` aus dem DMC-Converter), werden nur kopiert. Läuft automatisch auf einer Arbeitskopie; die Quellkacheln bleiben unverändert. Details siehe [4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py](processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py).
 
 **Lokales Staging** *(Performance, Feld „Lokaler Temp-Ordner“)*
 Bei grossen Lieferungen über ein Netzlaufwerk kann ein lokaler Zwischenordner angegeben werden – reduziert die Anzahl Netzwerktransfers pro Tile deutlich.
@@ -102,7 +115,7 @@ Bei grossen Lieferungen über ein Netzlaufwerk kann ein lokaler Zwischenordner a
 
 - **Normales Python 3.x** zum Starten der GUI (kein OSGeo4W-Start nötig)
   - Die GUI findet den OSGeo4W-Python-Pfad automatisch, alternativ Button **Ändern…**
-- **PDAL-CLI**, nur für `SB_DSM_PUNKTWOLKE` (LAS 1.2 → 1.4 Vorkonversion, läuft automatisch)
+- **PDAL-CLI**, nur für `SB_DSM_PUNKTWOLKE` (LAS-1.4-Vorkonversion, läuft automatisch)
 - Netzwerkzugriff auf das GDWH-Bucket
 - Korrektes Dateinamen-Format (siehe Tabelle oben) – zwingend für die XML-Generierung
 
@@ -126,7 +139,7 @@ logs\GDWHimport_archived_AREA_proGDS.log
 ```bash
 python standaloneTools/test_functions.py
 ```
-Prüft die reinen Python-Funktionen ohne OSGeo4W/GDAL-Abhängigkeit (Mock).
+Prüft die reinen Python-Funktionen ohne OSGeo4W/GDAL-Abhängigkeit (Mock). Benötigt `numpy`; die Tests zu `3_fix_false_nodata_dop.py` brauchen zusätzlich `scipy` und werden ohne scipy übersprungen.
 
 ---
 
@@ -151,10 +164,10 @@ Prüft die reinen Python-Funktionen ohne OSGeo4W/GDAL-Abhängigkeit (Mock).
 | `processingScripts/2_1_SB_DOP_16_FOLDERorganize_by_lineID.py` | Sortiert 16BIT-DOP-Dateien nach LineID | (direkt möglich, Pfad anpassen) |
 | `processingScripts/2_2_SB_DOP_16_GDS_upload_GDWH_withCHECKxml.py` | Sub-Script für `SB_DOP_16` | (direkt möglich, Working Part anpassen) |
 | `processingScripts/3_fix_false_nodata_dop.py` | Optionale NoData-Vorkorrektur (SB_DOP), läuft in-place vor Script 1 | ✓ (eigenständiges CLI, siehe Docstring) |
-| `processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py` | LAS 1.2 → 1.4 Vorkonversion (SB_DSM_PUNKTWOLKE), läuft immer automatisch vor Script 1, schreibt auf Arbeitskopie | ✓ (eigenständiges CLI, siehe Docstring) |
+| `processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py` | LAS-1.4-Vorkonversion (SB_DSM_PUNKTWOLKE), läuft immer automatisch vor Script 1, schreibt auf Arbeitskopie; Ziel PF6, bei DMC-4 mit RGB-Werten PF7 (CLI: `--keep-rgb`) | ✓ (eigenständiges CLI, siehe Docstring) |
 | `processingScripts/_osgeo_runner.py` | Interner Subprocess-Runner (OSGeo4W Python) | – |
 | `processingScripts/_tif_preview_reader.py` | Interner Subprocess-Helper: erzeugt die TIF-Vorschau im GUI | – |
-| `standaloneTools/5_LAS12_LAS14_batch_inplace_upgrade.py` | Standalone Batch-Tool: LAS 1.2 → 1.4 Inplace-Upgrade über viele Ordner (Textliste), Output = Input, für unbeaufsichtigte Vorprozessierung ausserhalb der GUI-Pipeline | ✓ (eigenständiges CLI, siehe Docstring) |
+| `standaloneTools/5_LAS12_LAS14_batch_inplace_upgrade.py` | Standalone Batch-Tool: LAS 1.2 → 1.4 Inplace-Upgrade über viele Ordner (Textliste), Output = Input, für unbeaufsichtigte Vorprozessierung ausserhalb der GUI-Pipeline; Ziel immer PF6 (ADS-Archivbestände) | ✓ (eigenständiges CLI, siehe Docstring) |
 | `standaloneTools/5_1_LAS12_FolderCopy_4_BatchProcessing.py` | Standalone Tool: kopiert Archiv-Ordner mit LAS-1.2-.laz-Kacheln gespiegelt in eine Kopie, als Vorbereitung für obiges Batch-Tool | ✓ (eigenständiges CLI, siehe Docstring) |
 | `standaloneTools/test_functions.py` | Unit-Tests | ✓ |
 
