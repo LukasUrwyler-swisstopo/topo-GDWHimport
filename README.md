@@ -137,9 +137,9 @@ logs\GDWHimport_archived_AREA_proGDS.log
 ## Tests
 
 ```bash
-python standaloneTools/test_functions.py
+python test/test_functions.py
 ```
-Prüft die reinen Python-Funktionen ohne OSGeo4W/GDAL-Abhängigkeit (Mock). Benötigt `numpy`; die Tests zu `3_fix_false_nodata_dop.py` brauchen zusätzlich `scipy` und werden ohne scipy übersprungen.
+Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSGeo4W/GDAL-Abhängigkeit (Mock). Benötigt `numpy`; die Tests zu `3_fix_false_nodata_dop.py` brauchen zusätzlich `scipy` und werden ohne scipy übersprungen.
 
 ---
 
@@ -167,11 +167,9 @@ Prüft die reinen Python-Funktionen ohne OSGeo4W/GDAL-Abhängigkeit (Mock). Ben�
 | `processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py` | LAS-1.4-Vorkonversion (SB_DSM_PUNKTWOLKE), läuft immer automatisch vor Script 1, schreibt auf Arbeitskopie; Ziel PF6, bei DMC-4 mit RGB-Werten PF7 (CLI: `--keep-rgb`) | ✓ (eigenständiges CLI, siehe Docstring) |
 | `processingScripts/_osgeo_runner.py` | Interner Subprocess-Runner (OSGeo4W Python) | – |
 | `processingScripts/_tif_preview_reader.py` | Interner Subprocess-Helper: erzeugt die TIF-Vorschau im GUI | – |
-| `standaloneTools/5_LAS12_LAS14_batch_inplace_upgrade.py` | Standalone Batch-Tool: LAS 1.2 → 1.4 Inplace-Upgrade über viele Ordner (Textliste), Output = Input, für unbeaufsichtigte Vorprozessierung ausserhalb der GUI-Pipeline; Ziel immer PF6 (ADS-Archivbestände) | ✓ (eigenständiges CLI, siehe Docstring) |
-| `standaloneTools/5_1_LAS12_FolderCopy_4_BatchProcessing.py` | Standalone Tool: kopiert Archiv-Ordner mit LAS-1.2-.laz-Kacheln gespiegelt in eine Kopie, als Vorbereitung für obiges Batch-Tool | ✓ (eigenständiges CLI, siehe Docstring) |
-| `standaloneTools/test_functions.py` | Unit-Tests | ✓ |
+| `test/test_functions.py` | Unit-Tests für die Sub-Scripts in `processingScripts/` | ✓ |
 
-`GUI_importToGDWH-STAC_SpezialBefliegung.py` liegt im Projekt-Hauptverzeichnis, die Sub-Scripts in `processingScripts/` (von der GUI/vom Runner dynamisch geladen bzw. per Subprocess gestartet), die eigenständigen CLI-Tools in `standaloneTools/` und die Konfiguration in `config/_gdwh_config.json` (wird beim ersten GUI-Start automatisch erstellt).
+`GUI_importToGDWH-STAC_SpezialBefliegung.py` liegt im Projekt-Hauptverzeichnis, die Sub-Scripts in `processingScripts/` (von der GUI/vom Runner dynamisch geladen bzw. per Subprocess gestartet), die Unit-Tests in `test/` und die Konfiguration in `config/_gdwh_config.json` (wird beim ersten GUI-Start automatisch erstellt).
 
 **Whitelist bei der Quellordner-Bereinigung:**
 
