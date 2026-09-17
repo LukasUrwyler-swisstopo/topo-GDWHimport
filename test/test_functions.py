@@ -66,6 +66,9 @@ osgeo_runner = _import_script("_osgeo_runner.py")
 # per subprocess) - die Validierungsfunktionen sind reine Dict-Vergleiche.
 las14 = _import_script("4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py")
 
+# LineID-Formate je CameraSystem (nur Standardbibliothek, GUI + Script 1)
+lineids = _import_script("_line_ids.py")
+
 # fix_false_nodata (Script 3) braucht echtes scipy (ndimage.label) fuer
 # sinnvolle Tests der Connected-Component-Klassifikation - das laesst sich
 # nicht sinnvoll mocken. Import defensiv, damit die restliche Testsuite auch
@@ -1027,10 +1030,12 @@ class TestLas14Zielformat(unittest.TestCase):
     def test_dmc_mit_rgb_wird_pf7(self):
         self.assertEqual(las14.choose_target_point_format(_RGB, True, "k.laz"), 7)
 
-    def test_dmc_ohne_rgb_wird_pf6(self):
-        # kein Farbfeld (None) und lauter Nullen gelten beide als "keine Farbe"
-        self.assertEqual(las14.choose_target_point_format(None, True, "k.laz"), 6)
-        self.assertEqual(las14.choose_target_point_format(_RGB_NULL, True, "k.laz"), 6)
+    def test_dmc_ohne_rgb_ist_fehler(self):
+        # DMC-Punktwolken muessen Farbe haben (XML: "PointCloud LAZ RGB") - kein
+        # Farbfeld (None) und lauter Nullen gelten beide als "keine Farbe"
+        for rgb in (None, _RGB_NULL):
+            with self.assertRaises(ValueError):
+                las14.choose_target_point_format(rgb, True, "k.laz")
 
     def test_ads_ohne_rgb_bleibt_pf6(self):
         self.assertEqual(las14.choose_target_point_format(None, False, "k.laz"), 6)
@@ -1157,6 +1162,356 @@ class TestLas14Kachelrahmen(unittest.TestCase):
             self.assertEqual(os.listdir(dst_dir), [])  # kein Ziel, keine Temp-Datei
         finally:
             shutil.rmtree(dst_dir, ignore_errors=True)
+
+
+# ============================================================
+#  SB_DOP mit Leica DMC-4: 4-Band RGBN (8bit)
+#  Seit der Umstellung liefert die DMC-Pipeline vier Baender. Der
+#  NoData-Wert muss darum vier Werte haben - sonst ueberspringen
+#  tag_nodata_on_raster und _compute_nodata_mask die Datei still
+#  (Wertzahl != Bandzahl), und die Kachel kaeme ohne NoData-Tag und
+#  ohne Flag Mask ins GDWH.
+# ============================================================
+class TestNormalizeNodataForOutput(unittest.TestCase):
+    """Der geschriebene Wert (GDAL-Tag UND XML <NoData>) wird bei DOP immer auf
+    0 normalisiert - die Anzahl Werte bleibt dabei erhalten, damit sie weiter
+    zur Bandzahl passt."""
+
+    def test_vier_werte_bleiben_vier(self):
+        self.assertEqual(allGDS.normalize_nodata_for_output("SB_DOP", "0 0 0 0"), "0 0 0 0")
+
+    def test_drei_werte_bleiben_drei(self):
+        self.assertEqual(allGDS.normalize_nodata_for_output("SB_DOP", "0 0 0"), "0 0 0")
+
+    def test_weiss_wird_auf_null_normalisiert_ohne_anzahl_zu_aendern(self):
+        self.assertEqual(allGDS.normalize_nodata_for_output("SB_DOP", "255 255 255"), "0 0 0")
+        self.assertEqual(
+            allGDS.normalize_nodata_for_output("SB_DOP_16", "65535 65535 65535 65535"),
+            "0 0 0 0")
+
+    def test_dsm_bleibt_unveraendert(self):
+        self.assertEqual(
+            allGDS.normalize_nodata_for_output("SB_DSM", "-3.4028235e+38"), "-3.4028235e+38")
+
+
+class TestRgbnMaskeWasser(unittest.TestCase):
+    """Wasserflaechen duerfen NICHT maskiert werden.
+
+    Im NIR ist 0 ein echter Messwert - Wasser reflektiert im nahen Infrarot
+    praktisch nicht. Maskiert wird nur, wo ALLE vier Baender ihrem NoData-Wert
+    entsprechen (echter Rand / ausserhalb des Clip-Shapes)."""
+
+    def _run(self, band_arrays, nodata_str):
+        ds = _FakeDataset(band_arrays)
+        with unittest.mock.patch.object(allGDS.gdal, "Open", return_value=ds):
+            allGDS.tag_mask_on_raster("dummy.tif", nodata_str)
+        return ds
+
+    def test_wasser_bleibt_gueltig_rand_wird_maskiert(self):
+        # Pixel (0,0): alle vier Baender 0      -> echter Rand, ungueltig
+        # Pixel (0,1): nur NIR 0, RGB gueltig   -> Wasser, MUSS gueltig bleiben
+        r = np.array([[0,  40], [40,  40]], dtype=np.uint8)
+        g = np.array([[0,  90], [90,  90]], dtype=np.uint8)
+        b = np.array([[0, 140], [140, 140]], dtype=np.uint8)
+        n = np.array([[0,   0], [200, 200]], dtype=np.uint8)   # NIR am Wasser = 0
+        ds = self._run([r, g, b, n], "0 0 0 0")
+        expected = np.array([[0, 255], [255, 255]], dtype=np.uint8)
+        self.assertTrue((ds._mask_band.written == expected).all(),
+                        f"Wasser wurde maskiert: {ds._mask_band.written.tolist()}")
+
+    def test_drei_werte_auf_vier_baendern_erzeugt_keine_maske(self):
+        # Genau der Fall, den die feste DMC-Auswahl verhindert: drei Werte auf
+        # einer 4-Band-Kachel -> gar keine Maske, nur eine Log-Warnung.
+        arr = np.full((2, 2), 0, dtype=np.uint8)
+        ds = self._run([arr] * 4, "0 0 0")
+        self.assertFalse(ds.mask_created)
+        self.assertEqual(ds._mask_band.write_calls, 0)
+
+
+class _GuiAppTestCase(unittest.TestCase):
+    """Basis fuer GUI-Tests: laedt die GUI und erzeugt pro Test ein Fenster.
+    Braucht ein Display - wird ohne tkinter uebersprungen."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import tkinter  # noqa: F401
+        except Exception as e:
+            raise unittest.SkipTest(f"tkinter nicht verfuegbar: {e}")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "GUI_importToGDWH-STAC_SpezialBefliegung.py")
+        spec = importlib.util.spec_from_file_location("gui_import", path)
+        cls.gui = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(cls.gui)
+        except Exception as e:
+            raise unittest.SkipTest(f"GUI nicht ladbar: {e}")
+        cls.app_cls = next(v for v in vars(cls.gui).values()
+                           if isinstance(v, type) and hasattr(v, "_get_nodata"))
+
+    def setUp(self):
+        try:
+            self.app = self.app_cls()
+        except Exception as e:
+            self.skipTest(f"kein Display: {e}")
+        self.addCleanup(self.app.destroy)
+
+
+class TestDmcNodataGuiRegeln(_GuiAppTestCase):
+    """GUI-Regeln fuer SB_DOP + Leica DMC-4 (siehe _update_camera_nodata_rules):
+    vier Werte, Dropdown gesperrt, Vorkorrektur aus."""
+
+    def test_dmc_liefert_vier_werte_und_sperrt_das_dropdown(self):
+        self.app.gds_var.set("SB_DOP")
+        self.app.camera_var.set(self.gui.DMC_CAMERA)
+        self.assertEqual(self.app._get_nodata(), "0 0 0 0")
+        self.assertEqual(str(self.app.nodata_cb.cget("state")), "disabled")
+        self.assertEqual(list(self.app.nodata_cb.cget("values")), self.gui.NODATA_DMC_OPT)
+
+    def test_kamerawechsel_stellt_die_ads_auswahl_wieder_her(self):
+        self.app.gds_var.set("SB_DOP")
+        self.app.camera_var.set(self.gui.DMC_CAMERA)
+        self.app.camera_var.set("Leica ADS100")
+        self.assertEqual(self.app._get_nodata(), "0 0 0")
+        self.assertEqual(str(self.app.nodata_cb.cget("state")), "readonly")
+        self.assertEqual(list(self.app.nodata_cb.cget("values")), self.gui.NODATA_DOP_OPT)
+
+    def test_dmc_schaltet_die_vorkorrektur_ab(self):
+        self.app.gds_var.set("SB_DOP")
+        self.app.fix_nodata_var.set(True)
+        self.app.camera_var.set(self.gui.DMC_CAMERA)
+        self.assertFalse(self.app.fix_nodata_var.get())
+        self.assertFalse(self.app._build_meta_info().get("FixFalseNodata"))
+
+    def test_dop16_bleibt_von_der_dmc_regel_unberuehrt(self):
+        self.app.gds_var.set("SB_DOP_16")
+        self.app.camera_var.set(self.gui.DMC_CAMERA)
+        self.assertEqual(list(self.app.nodata_cb.cget("values")), self.gui.NODATA_D16_OPT)
+
+    def test_validierung_akzeptiert_die_dmc_auswahl(self):
+        # _nodata_options ist die einzige Quelle - laeuft sie auseinander,
+        # meldet _validate faelschlich "keine gueltige Auswahl erkannt".
+        self.app.gds_var.set("SB_DOP")
+        self.app.camera_var.set(self.gui.DMC_CAMERA)
+        opts, vals = self.app._nodata_options()
+        self.assertIn(self.app.nodata_var.get(), opts)
+        self.assertEqual(vals[opts.index(self.app.nodata_var.get())], "0 0 0 0")
+
+
+# ============================================================
+#  LineIDs Leica DMC-4  (_line_ids.py, Script 1)
+#  Eingabe YYYYMMDD_LLL_HHMMSS_BBB_QQQQQ -> XML YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS,
+#  GGGG = HHMM der ersten beflogenen Linie (Gruppennummer)
+# ============================================================
+DMC = "Leica DMC-4"
+ADS = "Leica ADS100"
+_DMC_003 = "20260813_003_082221_076_41216"
+_DMC_004 = "20260813_004_082750_012_41216"
+
+
+class TestLineIdsDmc(unittest.TestCase):
+
+    def test_format_pro_kamera(self):
+        self.assertTrue(lineids.is_valid(_DMC_003, DMC))
+        self.assertFalse(lineids.is_valid(_DMC_003, ADS))
+        self.assertTrue(lineids.is_valid("20200821_0952_12504", ADS))
+        self.assertFalse(lineids.is_valid("20200821_0952_12504", DMC))
+        self.assertFalse(lineids.is_valid(_DMC_003 + ".tif", DMC))
+
+    def test_beispiele_gruppennummer_der_ersten_linie(self):
+        # Eingabe in falscher Reihenfolge - beide bekommen die Gruppe 0822
+        self.assertEqual(lineids.xml_line_ids([_DMC_004, _DMC_003], DMC),
+                         ["20260813_0822_41216_003_082221", "20260813_0822_41216_004_082750"])
+
+    def test_einzelne_linie_eigene_gruppe(self):
+        self.assertEqual(lineids.xml_line_ids([_DMC_004], DMC),
+                         ["20260813_0827_41216_004_082750"])
+
+    def test_anderes_bild_derselben_linie_ist_duplikat(self):
+        other_image = "20260813_004_082750_014_41216"
+        self.assertEqual(lineids.normalize([_DMC_004, other_image, _DMC_003], DMC),
+                         [_DMC_003, _DMC_004])
+
+    def test_sortierung_nach_zeit_nicht_nach_liniennummer(self):
+        frueh_hohe_nummer = "20260813_005_081000_001_41216"
+        self.assertEqual(lineids.xml_line_ids([_DMC_003, frueh_hohe_nummer], DMC),
+                         ["20260813_0810_41216_005_081000", "20260813_0810_41216_003_082221"])
+
+    def test_ungueltige_id_wirft(self):
+        with self.assertRaises(ValueError):
+            lineids.normalize(["20200821_0952_12504"], DMC)
+
+    def test_stac_datetime_sekunden_plus_hundertstel_00(self):
+        self.assertEqual(lineids.stac_datetime([_DMC_004, _DMC_003], DMC), "2026-08-13t08222100")
+        self.assertEqual(lineids.stac_datetime(["20200821_0952_12504"], ADS), "2020-08-21t09520000")
+        self.assertEqual(lineids.stac_datetime(["kaputt"], DMC), "—")
+
+    def test_ads_bleibt_unveraendert(self):
+        ids = ["20200913_1054_12501", "20200913_1104_12501"]
+        self.assertEqual(lineids.xml_line_ids(ids, ADS), ids)
+
+
+class TestLineIdXmlFields(unittest.TestCase):
+
+    def test_dmc_alle_abhaengigen_werte(self):
+        f = allGDS.line_id_xml_fields({"Line_ID": [_DMC_004, _DMC_003], "CameraSystem": DMC})
+        self.assertEqual(f["LineID"], "20260813_0822_41216_003_082221,20260813_0822_41216_004_082750")
+        self.assertEqual(f["AcquisitionTimes"], "2026-08-13T08:22:21.00,2026-08-13T08:27:50.00")
+        self.assertEqual(f["FirstAcquisitionTime"], "2026-08-13T08:22:21.00")
+        self.assertEqual(f["StacItemIdDatetime"], "2026-08-13t08222100")
+        self.assertEqual(f["BandID"], "0822")
+        self.assertEqual(f["Year"], "2026")
+
+    def test_ads_wie_bisher(self):
+        f = allGDS.line_id_xml_fields({"Line_ID": ["20200913_1054_12501", "20200913_1104_12501"],
+                                       "CameraSystem": ADS})
+        self.assertEqual(f["LineID"], "20200913_1054_12501,20200913_1104_12501")
+        self.assertEqual(f["FirstAcquisitionTime"], "2020-09-13T10:54:00.00")
+        self.assertEqual(f["StacItemIdDatetime"], "2020-09-13t10540000")
+        self.assertEqual(f["BandID"], "1054")
+
+    def test_gui_stac_link_gleich_xml(self):
+        for ids, cam in (([_DMC_004, _DMC_003], DMC), (["20250919_1005_12501"], ADS)):
+            xml = allGDS.line_id_xml_fields({"Line_ID": ids, "CameraSystem": cam})
+            self.assertEqual(lineids.stac_datetime(ids, cam), xml["StacItemIdDatetime"])
+
+    def test_create_xml_schreibt_dmc_lineid(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        tif = os.path.join(tmpdir, "2026_GUPPENFIRN_DOP_10cm_RGBN_2713_1204_LV95.tif")
+        open(tif, "w").close()
+        meta = {"Auftragstyp": "kry", "Line_ID": [_DMC_004, _DMC_003], "CameraSystem": DMC,
+                "NoData": "0 0 0 0", "SourceReferenceSystem": "(EPSG:2056) CH1903+ / LV95_LHN95"}
+        xml_path, _, first = allGDS.create_xml(tif, "SB_DOP", meta, cached_raster_attrs={})
+        with open(xml_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("<LineID>20260813_0822_41216_003_082221,20260813_0822_41216_004_082750</LineID>", content)
+        self.assertIn("<CoordinateReferenceSystem>(EPSG:2056) CH1903+ / LV95_LHN95</CoordinateReferenceSystem>", content)
+        self.assertIn("<NoData>0 0 0 0</NoData>", content)
+        self.assertEqual(first, "2026-08-13T08:22:21.00")
+
+
+# ============================================================
+#  TIFF-CRS pruefen/setzen  (aus allGDS)
+# ============================================================
+def _crs_info(**override):
+    info = {"has_crs": True, "in_lv95_extent": True, "name": "CH1903+ / LV95",
+            "is_compound": False, "horizontal_is_lv95": True, "vertical_epsg": None}
+    info.update(override)
+    return info
+
+
+class TestTiffCrs(unittest.TestCase):
+    LN02 = "EPSG:2056+5728"
+    LV95 = "EPSG:2056"
+
+    def test_soll_crs_pro_gds_und_kamera(self):
+        self.assertEqual(allGDS.tiff_crs_target("SB_DSM", {"CameraSystem": ADS}), self.LN02)
+        self.assertEqual(allGDS.tiff_crs_target("SB_DSM", {"CameraSystem": DMC}), self.LN02)
+        self.assertEqual(allGDS.tiff_crs_target("SB_DSM", {"CameraSystem": DMC},
+                                                "2026_GUPPENFIRN_DSM_50cm_LV95_LN02.tif"), self.LN02)
+        # Hillshade ist nur Darstellung - ohne Hoehenbezug
+        self.assertEqual(allGDS.tiff_crs_target("SB_DSM", {"CameraSystem": ADS},
+                                                "2026_GUPPENFIRN_hillshade_50cm_LV95_LN02.tif"), self.LV95)
+        self.assertEqual(allGDS.tiff_crs_target("SB_DOP", {"CameraSystem": DMC}), self.LV95)
+        self.assertIsNone(allGDS.tiff_crs_target("SB_DOP", {"CameraSystem": ADS}))
+        self.assertIsNone(allGDS.tiff_crs_target("SB_DSM_PUNKTWOLKE", {"CameraSystem": DMC}))
+
+    def test_dop_lv95_bleibt_unveraendert(self):
+        self.assertEqual(allGDS.decide_crs_action(_crs_info(), self.LV95), "ok")
+
+    def test_dop_hoehenbezug_wird_entfernt(self):
+        info = _crs_info(is_compound=True, vertical_epsg="5729", name="CH1903+ / LV95 + LHN95 height")
+        self.assertEqual(allGDS.decide_crs_action(info, self.LV95), "set")
+
+    def test_dsm_2d_wird_auf_ln02_gesetzt(self):
+        self.assertEqual(allGDS.decide_crs_action(_crs_info(), self.LN02), "set")
+
+    def test_dsm_ln02_bleibt_unveraendert(self):
+        info = _crs_info(is_compound=True, vertical_epsg="5728")
+        self.assertEqual(allGDS.decide_crs_action(info, self.LN02), "ok")
+
+    def test_dsm_lhn95_ist_fehler(self):
+        info = _crs_info(is_compound=True, vertical_epsg="5729")
+        with self.assertRaises(ValueError):
+            allGDS.decide_crs_action(info, self.LN02)
+
+    def test_ohne_crs_nur_setzen_wenn_koordinaten_lv95(self):
+        self.assertEqual(allGDS.decide_crs_action(_crs_info(has_crs=False), self.LV95), "set")
+        with self.assertRaises(ValueError):
+            allGDS.decide_crs_action(_crs_info(has_crs=False, in_lv95_extent=False), self.LV95)
+
+    def test_anderes_crs_wird_nicht_umgetaggt(self):
+        info = _crs_info(horizontal_is_lv95=False, name="CH1903 / LV03")
+        for target in (self.LV95, self.LN02):
+            with self.assertRaises(ValueError):
+                allGDS.decide_crs_action(info, target)
+
+    def test_lv95_ausdehnung(self):
+        # Kachel aus dem gdalinfo (GUPPENFIRN): 10000 x 10000 px, 0.1 m
+        self.assertTrue(allGDS._in_lv95_extent((2713000, 0.1, 0, 1205000, 0, -0.1), 10000, 10000))
+        # dieselbe Kachel in LV03-Koordinaten
+        self.assertFalse(allGDS._in_lv95_extent((713000, 0.1, 0, 205000, 0, -0.1), 10000, 10000))
+
+
+class TestDmcMetaGuiRegeln(_GuiAppTestCase):
+    """GUI-Regeln Leica DMC-4: TerrainModel, SourceRefSys, CustomAttribute,
+    LineID-Format und Sperre SB_DOP_16 (siehe _update_camera_meta_rules)."""
+
+    def _waehle(self, gds, camera):
+        self.app.gds_var.set(gds)
+        self.app._on_gds_change()
+        self.app.camera_var.set(camera)
+
+    def test_terrain_model_gesperrt_und_wieder_frei(self):
+        self.app.terrain_var.set("swissALTI3D")
+        self._waehle("SB_DSM", DMC)
+        self.assertEqual(self.app.terrain_var.get(), self.gui.DMC_TERRAIN_MODEL)
+        self.assertEqual(str(self.app.terrain_cb.cget("state")), "disabled")
+        self.app.camera_var.set(ADS)
+        self.assertEqual(str(self.app.terrain_cb.cget("state")), "readonly")
+
+    def test_sb_dop_dmc_meta(self):
+        self._waehle("SB_DOP", DMC)
+        meta = self.app._build_meta_info()
+        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+ / LV95_LHN95")
+        self.assertEqual(meta["CustomAttribute"], "Digital OrthoPhoto - Mosaic RGBN 8BIT")
+        self.assertEqual(meta["TerrainModel"], self.gui.DMC_TERRAIN_MODEL)
+
+    def test_dsm_und_punktwolke_bleiben_ln02(self):
+        self._waehle("SB_DSM", DMC)
+        meta = self.app._build_meta_info()
+        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+ / LV95_LN02")
+        self.assertEqual(meta["CustomAttribute"], self.gui.GDS_CUSTOM_ATTR["SB_DSM"])
+        self._waehle("SB_DSM_PUNKTWOLKE", DMC)
+        meta = self.app._build_meta_info()
+        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+ / LV95_LN02")
+        self.assertEqual(meta["CustomAttribute"],
+                         "Digital Surface Model - PointCloud LAZ RGB (DSM photogrammetric autocorrelation)")
+
+    def test_dop16_mit_dmc_sperrt_formular_und_start(self):
+        self._waehle("SB_DOP_16", DMC)
+        input_folder_entry = next(w for w in self.app.if_frame.winfo_children()
+                                  if isinstance(w, self.gui.ttk.Entry))
+        self.assertEqual(str(self.app.start_btn.cget("state")), "disabled")
+        self.assertEqual(str(input_folder_entry.cget("state")), "disabled")
+        self.assertEqual(str(self.app.nodata_cb.cget("state")), "disabled")
+        self.assertEqual(str(self.app.camera_cb.cget("state")), "readonly")
+        # zurueck auf ADS: Formular wieder frei
+        self.app.camera_var.set(ADS)
+        self.assertEqual(str(input_folder_entry.cget("state")), "normal")
+        self.assertEqual(str(self.app.nodata_cb.cget("state")), "readonly")
+
+    def test_lineid_widget_dmc_sortiert_und_entfernt_bei_kamerawechsel(self):
+        self._waehle("SB_DSM", DMC)
+        with unittest.mock.patch.object(self.gui.messagebox, "showwarning") as warn:
+            self.assertTrue(self.app.lineid_w._add_one(_DMC_004))
+            self.assertTrue(self.app.lineid_w._add_one(_DMC_003))
+            self.assertFalse(self.app.lineid_w._add_one("20260813_004_082750_014_41216"))
+            self.assertEqual(self.app.lineid_w.get_ids(), [_DMC_003, _DMC_004])
+            self.app.camera_var.set(ADS)
+            self.assertEqual(self.app.lineid_w.get_ids(), [])
+            self.assertEqual(warn.call_count, 2)  # Duplikat + entfernte IDs
 
 
 if __name__ == "__main__":

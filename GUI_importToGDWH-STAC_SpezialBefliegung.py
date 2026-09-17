@@ -23,6 +23,11 @@ RUNNER_SCRIPT = os.path.join(PROCESSING_DIR, "_osgeo_runner.py")
 SCRIPT_PREVIEW = os.path.join(PROCESSING_DIR, "_tif_preview_reader.py")
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config", "_gdwh_config.json")
 
+# LineID-Formate je CameraSystem - gemeinsames Modul mit Script 1 (nur Standardbibliothek)
+if PROCESSING_DIR not in sys.path:
+    sys.path.insert(0, PROCESSING_DIR)
+import _line_ids
+
 # ─── Auswahllisten ────────────────────────────────────────────────────────────
 GDS_ITEMS = [
     ("SB_DOP",            "DOPmosaik, RGB, 8BIT, LV95"),
@@ -37,6 +42,11 @@ GDS_CUSTOM_ATTR = {
     "SB_DOP_16":         "Digital OrthoPhoto - (ADS Line) NRGB 16BIT",
     "SB_DSM":            "Digital Surface Model  - Raster Mosaic (DSM photogrammetric autocorrelation)",
     "SB_DSM_PUNKTWOLKE": "Digital Surface Model - PointCloud LAZ (DSM photogrammetric autocorrelation)",
+}
+# Abweichungen bei Leica DMC-4 (DOP immer 4-Band RGBN, Punktwolke immer mit Farbe)
+GDS_CUSTOM_ATTR_DMC = {
+    "SB_DOP":            "Digital OrthoPhoto - Mosaic RGBN 8BIT",
+    "SB_DSM_PUNKTWOLKE": "Digital Surface Model - PointCloud LAZ RGB (DSM photogrammetric autocorrelation)",
 }
 
 # GDWH-Catalog-Import-Link je GDS (für Hinweis-Dialog nach erfolgreicher Prozessierung).
@@ -61,15 +71,28 @@ TERRAIN_MODELS = [
     "swissALTI3D", "swissALTI3D/DHM25", "swissSURFACE3D",
 ]
 CAMERA_SYSTEMS = ["Leica ADS100", "Leica ADS80", "Leica DMC-4"]
-# DMC-4: SB_DOP-NoData fix '0 0 0' ohne Vorkorrektur (siehe _update_camera_nodata_rules),
-# Punktwolken mit RGB-Werten als PF7 (siehe Script 4 / _osgeo_runner.RGB_CAMERA_SYSTEMS)
-DMC_CAMERA     = "Leica DMC-4"
+# DMC-4: SB_DOP-NoData fix '0 0 0 0' ohne Vorkorrektur (siehe _update_camera_nodata_rules),
+# Punktwolken immer PF7 mit RGB (siehe Script 4 / _osgeo_runner.RGB_CAMERA_SYSTEMS),
+# TerrainModel/SourceRefSys/CustomAttribute/SB_DOP_16 siehe _update_camera_meta_rules
+DMC_CAMERA        = _line_ids.DMC_CAMERA
+DMC_TERRAIN_MODEL = TERRAIN_MODELS[0]
 SOURCE_REF_SYS = "(EPSG:2056) CH1903+ / LV95_LN02"
+# SB_DOP mit DMC-4: DOP mit LHN95 gerechnet. Gleiche Form wie LV95_LN02 - der EPSG-Code
+# in Klammern bleibt horizontal (2056), der Hoehenbezug steht nur als Text. Im TIFF
+# selbst nur EPSG:2056 (siehe tiff_crs_target in Script 1).
+SOURCE_REF_SYS_DOP_DMC = "(EPSG:2056) CH1903+ / LV95_LHN95"
 NODATA_DOP_OPT = ["0 0 0   (schwarz, 8BIT RGB)",     "255 255 255   (weiss, 8BIT RGB)"]
 NODATA_DOP_VAL = ["0 0 0",                            "255 255 255"]
 NODATA_D16_OPT = ["0 0 0 0   (schwarz, 16BIT NRGB)", "65535 65535 65535 65535   (weiss, 16BIT NRGB)"]
 NODATA_D16_VAL = ["0 0 0 0",                          "65535 65535 65535 65535"]
-LINE_ID_PAT    = re.compile(r'^\d{8}_\d{4}_\d{5}$')
+# SB_DOP mit Leica DMC-4: seit der Umstellung auf 4-Band RGBN (8bit) liefert die
+# DMC-Pipeline (Reality Studio -> DMC-Converter) immer vier Baender, NoData immer
+# schwarz. Darum genau eine Option, im GUI gesperrt. Die Wertzahl MUSS zur Bandzahl
+# passen: tag_nodata_on_raster und _compute_nodata_mask (Script 1) ueberspringen
+# Dateien, bei denen Werte- und Bandzahl nicht uebereinstimmen.
+NODATA_DMC_OPT = ["0 0 0 0   (schwarz, 8BIT RGBN)"]
+NODATA_DMC_VAL = ["0 0 0 0"]
+LINE_ID_PAT    = _line_ids.ADS_LINE_ID_PAT  # SB_DOP_16 (nur ADS)
 
 # ─── Dateinamen-Konvention pro GDS (Button "Check - NameFormat") ──────────────
 NAME_FORMAT_SPECS = {
@@ -284,12 +307,24 @@ class _QueueWriter(io.TextIOBase):
 
 # ─── LineID-Listbox-Widget ────────────────────────────────────────────────────
 class LineIDWidget(ttk.LabelFrame):
-    def __init__(self, parent, label, comment="", **kw):
+    def __init__(self, parent, label, comment="", camera_getter=None, **kw):
         super().__init__(parent, text=label, padding=6, **kw)
         self._max_ids = None  # None = unbegrenzt
         self._comment_text = comment
         self._comment_lbl = None
+        # Liefert das CameraSystem (bestimmt das LineID-Format, siehe _line_ids.py);
+        # ohne Getter immer ADS-Format (allAreaLineIDs, nur SB_DOP_16)
+        self._camera_getter = camera_getter
         self._build()
+
+    def _camera(self):
+        return self._camera_getter() if self._camera_getter else ""
+
+    def _fmt_text(self):
+        text = f" Format: {_line_ids.format_hint(self._camera())}"
+        if self._max_ids != 1:
+            text += "  |  Mehrere IDs: aus Excel einfügen (Ctrl+V)"
+        return text
 
     def _build(self):
         if self._comment_text:
@@ -308,9 +343,7 @@ class LineIDWidget(ttk.LabelFrame):
 
         # Eigene Zeile unter Entry/Button, damit der "+"-Button (essentiell)
         # bei schmalerer Spaltenbreite nie durch den Hinweistext verdrängt wird.
-        self._fmt_lbl = ttk.Label(self,
-            text=" Format: YYYYMMDD_HHMM_QQQQQ  |  Mehrere IDs: aus Excel einfügen (Ctrl+V)",
-            font=("", 8))
+        self._fmt_lbl = ttk.Label(self, text=self._fmt_text(), font=("", 8))
         self._fmt_lbl.pack(fill="x", pady=(2, 0))
 
         lf = ttk.Frame(self)
@@ -328,29 +361,48 @@ class LineIDWidget(ttk.LabelFrame):
     def set_max_ids(self, n):
         """Setzt Limit auf n IDs (None = unbegrenzt). Entfernt überzählige Einträge."""
         self._max_ids = n
-        if n == 1:
-            self._fmt_lbl.config(
-                text=" Format: YYYYMMDD_HHMM_QQQQQ")
-        else:
-            self._fmt_lbl.config(
-                text=" Format: YYYYMMDD_HHMM_QQQQQ  |  Mehrere IDs: aus Excel einfügen (Ctrl+V)")
+        self._fmt_lbl.config(text=self._fmt_text())
         if n is not None:
             while self.lb.size() > n:
                 self.lb.delete(self.lb.size() - 1)
 
+    def refresh_camera(self):
+        """Nach einem CameraSystem-Wechsel: Formathinweis anpassen und Eintraege
+        entfernen, die nicht zum neuen LineID-Format passen (ADS <-> DMC-4).
+        Gibt die entfernten IDs zurueck."""
+        self._fmt_lbl.config(text=self._fmt_text())
+        cam = self._camera()
+        ids = list(self.lb.get(0, "end"))
+        removed = [i for i in ids if not _line_ids.is_valid(i, cam)]
+        if removed:
+            self.lb.delete(0, "end")
+            for i in ids:
+                if i not in removed:
+                    self.lb.insert("end", i)
+        self._resort()
+        return removed
+
+    def _existing_line_keys(self):
+        cam = self._camera()
+        return {_line_ids.line_key(i, cam) for i in self.lb.get(0, "end")
+                if _line_ids.is_valid(i, cam)}
+
     def _add_one(self, val):
         """Fügt eine einzelne validierte LineID zur Liste hinzu. Gibt True zurück bei Erfolg."""
+        cam = self._camera()
         if self._max_ids is not None and self.lb.size() >= self._max_ids:
             messagebox.showwarning("Limit erreicht",
                 f"Für SB_DOP_16 darf nur genau 1 Line_ID angegeben werden.", parent=self)
             return False
-        if not LINE_ID_PAT.match(val):
+        if not _line_ids.is_valid(val, cam):
             messagebox.showwarning("Ungültiges Format",
-                f"Erwartet: YYYYMMDD_HHMM_QQQQQ\nBeispiel:  20200821_0952_12504\n\nEingabe: {val}",
+                f"Erwartet: {_line_ids.format_hint(cam)}\nBeispiel:  {_line_ids.example(cam)}"
+                f"\n\nEingabe: {val}",
                 parent=self)
             return False
-        if val in self.lb.get(0, "end"):
-            messagebox.showwarning("Duplikat", f"Bereits erfasst: {val}", parent=self)
+        if _line_ids.line_key(val, cam) in self._existing_line_keys():
+            # DMC-4: auch ein anderes Bild derselben Linie gilt als Duplikat
+            messagebox.showwarning("Duplikat", f"Linie bereits erfasst: {val}", parent=self)
             return False
         self.lb.insert("end", val)
         self._resort()
@@ -381,16 +433,17 @@ class LineIDWidget(ttk.LabelFrame):
                     "Für SB_DOP_16 darf nur genau 1 Line_ID angegeben werden.", parent=self)
                 return "break"
             lines = lines[:available]
+        cam = self._camera()
         added, skipped = [], []
-        existing = set(self.lb.get(0, "end"))
+        existing = self._existing_line_keys()
         for line in lines:
-            if not LINE_ID_PAT.match(line):
+            if not _line_ids.is_valid(line, cam):
                 skipped.append(f"  {line}  →  falsches Format")
-            elif line in existing:
-                skipped.append(f"  {line}  →  Duplikat")
+            elif _line_ids.line_key(line, cam) in existing:
+                skipped.append(f"  {line}  →  Duplikat (Linie bereits erfasst)")
             else:
                 self.lb.insert("end", line)
-                existing.add(line)
+                existing.add(_line_ids.line_key(line, cam))
                 added.append(line)
         if added:
             self._resort()
@@ -409,12 +462,13 @@ class LineIDWidget(ttk.LabelFrame):
             self.lb.delete(i)
 
     def _resort(self):
-        """Sortiert die Liste chronologisch, älteste zuoberst.
-
-        Format YYYYMMDD_HHMM_QQQQQ ist fest breit/nullgepadded, daher
-        entspricht eine String-Sortierung bereits der Datumssortierung.
-        """
-        ids = sorted(self.lb.get(0, "end"))
+        """Sortiert die Liste chronologisch, älteste zuoberst - bei DMC-4 nach
+        Datum + Linienstart, nicht nach Liniennummer (siehe _line_ids.sort_key)."""
+        cam = self._camera()
+        try:
+            ids = sorted(self.lb.get(0, "end"), key=lambda i: _line_ids.sort_key(i, cam))
+        except (ValueError, IndexError):
+            ids = sorted(self.lb.get(0, "end"))
         self.lb.delete(0, "end")
         for i in ids:
             self.lb.insert("end", i)
@@ -567,6 +621,13 @@ class SicherheitsCheckDialog(tk.Toplevel):
         _kv(sec1, "Auftragstyp:", meta.get("Auftragstyp", ""))
         _kv(sec1, "CustomAttribute:", meta.get("CustomAttribute", ""))
         _kv(sec1, "Line_ID:", ", ".join(meta.get("Line_ID", [])))
+        is_dmc = meta.get("CameraSystem") == DMC_CAMERA
+        if is_dmc:
+            try:
+                xml_ids = ", ".join(_line_ids.xml_line_ids(meta.get("Line_ID", []), DMC_CAMERA))
+            except ValueError as e:
+                xml_ids = f"FEHLER – {e}"
+            _kv(sec1, "LineID (XML):", xml_ids)
         if "allAreaLineIDs" in meta:
             _kv(sec1, "allAreaLineIDs:", ", ".join(meta["allAreaLineIDs"]))
         if gds == "SB_DSM":
@@ -591,12 +652,18 @@ class SicherheitsCheckDialog(tk.Toplevel):
                      bg=T["root"], fg=T["fg_dim"], anchor="nw",
                      wraplength=560, justify="left").pack(anchor="w")
         _kv(sec1, "TerrainModel:", meta.get("TerrainModel", ""))
+        _kv(sec1, "SourceRefSys:", meta.get("SourceReferenceSystem", ""))
+        if gds == "SB_DSM":
+            _kv(sec1, "TIFF-CRS:", "DSM EPSG:2056+5728 (LV95 + LN02), Hillshade EPSG:2056 "
+                                   "– wird geprüft und bei Bedarf gesetzt")
+        elif gds == "SB_DOP" and is_dmc:
+            _kv(sec1, "TIFF-CRS:", "EPSG:2056 (LV95) – wird geprüft und bei Bedarf gesetzt")
         if gds == "SB_DSM_PUNKTWOLKE":
             _kv(sec1, "LAS 1.2 -> 1.4 Vorkonversion:",
                 "immer aktiv (CRS-Tag EPSG:2056+5728 wird byte-exakt gesetzt, siehe Log)")
             _kv(sec1, "Punktformat:",
-                "PF7 mit RGB, PF6 für Kacheln ohne RGB-Werte"
-                if meta.get("CameraSystem") == DMC_CAMERA
+                "PF7 mit RGB (Kachel ohne RGB-Werte = Abbruch)"
+                if is_dmc
                 else "PF6 (ohne RGB, Kachel mit RGB-Werten = Abbruch)")
         _kv(sec1, "CameraSystem:", meta.get("CameraSystem", ""))
 
@@ -629,12 +696,17 @@ class SicherheitsCheckDialog(tk.Toplevel):
                 "Vorgängig mit dem Button «check input-NoData» visuell kontrollieren.",
             ]
         elif gds == "SB_DOP":
+            nodata_frage = (
+                "Sind die NoData-Werte korrekt? (8BIT RGBN, 4-Band: schwarze "
+                "Background-Pixel = 0 0 0 0)   "
+                if is_dmc else
+                "Sind die NoData-Werte korrekt? (8BIT, 3-Band: schwarze "
+                "Background-Pixel = 0 0 0  /  weisse = 255 255 255)   ")
             check_questions = [
                 "Ist der Input Folder der korrekte Pfad zum DOP-Mosaik, "
                 "welches importiert werden soll?",
                 "Sind die Line_IDs korrekt?",
-                "Sind die NoData-Werte korrekt? (8BIT, 3-Band: schwarze "
-                "Background-Pixel = 0 0 0  /  weisse = 255 255 255)   "
+                nodata_frage +
                 "Vorgängig mit dem Button «check input-NoData» visuell kontrollieren.",
             ]
         else:
@@ -1108,6 +1180,8 @@ class GDWHApp(tk.Tk):
         self._accent_labels = []   # Labels mit accent (blau)
         self._hint_labels   = []   # Labels mit hint (amber) für Info-Hinweise
         self._check_format_btns = []   # "Check - NameFormat"-Buttons (amber/grün/rot)
+        self._form_locked   = False    # SB_DOP_16 + DMC-4, siehe _set_form_locked
+        self._locked_states = {}
         self._osgeo_python  = _detect_osgeo_python()
         self._osgeo_lbl     = None
         self._osgeo_status  = None
@@ -1261,6 +1335,7 @@ class GDWHApp(tk.Tk):
         sec = ttk.LabelFrame(parent, text="Meta-Informationen", padding=10, style="Section.TLabelframe")
         sec.pack(fill="x", pady=(0, 6))
         sec.columnconfigure(1, weight=1)
+        self._meta_sec = sec
         r = 0
 
         # Auftragstyp
@@ -1285,16 +1360,22 @@ class GDWHApp(tk.Tk):
         r += 2
 
         # CameraSystem – bewusst direkt nach Area/vor TileKey/NoData:
-        # bei Leica DMC-4 ist NoData (SB_DOP) fix '0 0 0' und die "fixing false
-        # NoData pixels"-Option (siehe unten) entfaellt - NoData-Dropdown und
-        # Vorkorrektur haengen also mit von dieser Auswahl ab.
+        # bei Leica DMC-4 ist NoData (SB_DOP) fix '0 0 0 0' und die "fixing false
+        # NoData pixels"-Option (siehe unten) entfaellt; ausserdem haengen
+        # TerrainModel, SourceRefSys, CustomAttribute und das LineID-Format davon ab.
         ttk.Label(sec, text="CameraSystem:", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
         self.camera_var = tk.StringVar(value=CAMERA_SYSTEMS[0])
-        ttk.Combobox(sec, textvariable=self.camera_var, values=CAMERA_SYSTEMS,
-                      state="readonly", width=20
-                      ).grid(row=r, column=1, sticky="w", padx=(8, 0), pady=3)
-        self.camera_var.trace_add("write", lambda *_: self._update_camera_nodata_rules())
-        r += 1
+        self.camera_cb = ttk.Combobox(sec, textvariable=self.camera_var, values=CAMERA_SYSTEMS,
+                                       state="readonly", width=20)
+        self.camera_cb.grid(row=r, column=1, sticky="w", padx=(8, 0), pady=3)
+        self.camera_var.trace_add("write", lambda *_: self._on_camera_change())
+        self.camera_block_lbl = ttk.Label(sec, font=("", 9, "bold"),
+            text="SB_DOP_16 gibt es mit Leica DMC-4 nicht – Import gesperrt "
+                 "(GDS oder CameraSystem wechseln)")
+        self.camera_block_lbl.grid(row=r+1, column=1, sticky="w", padx=(8, 0))
+        self.camera_block_lbl.grid_remove()
+        self._hint_labels.append(self.camera_block_lbl)
+        r += 2
 
         # TileKey – reine Diagnose-Vorschau (Beispiel aus der ersten Datei),
         # nicht editierbar: TileKey wird pro Datei einzeln berechnet.
@@ -1343,22 +1424,29 @@ class GDWHApp(tk.Tk):
         # TerrainModel
         ttk.Label(sec, text="TerrainModel:", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
         self.terrain_var = tk.StringVar(value=TERRAIN_MODELS[0])
-        ttk.Combobox(sec, textvariable=self.terrain_var, values=TERRAIN_MODELS,
-                      state="readonly", width=68
-                      ).grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=3)
-        r += 1
+        self.terrain_cb = ttk.Combobox(sec, textvariable=self.terrain_var, values=TERRAIN_MODELS,
+                                        state="readonly", width=68)
+        self.terrain_cb.grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=3)
+        self.terrain_hint = ttk.Label(sec, font=("", 8),
+            text="DMC-4: TerrainModel immer Digital Surface Model")
+        self.terrain_hint.grid(row=r+1, column=1, sticky="w", padx=(8, 0))
+        self.terrain_hint.grid_remove()
+        self._dim_labels.append(self.terrain_hint)
+        r += 2
 
         # CRS-Tagging LAZ (SB_DSM_PUNKTWOLKE) gibt es hier nicht mehr als
         # Option - die LAS 1.2 -> LAS 1.4 Vorkonversion (Script 4) laeuft
         # jetzt immer automatisch vor Script 1 (siehe _osgeo_runner.py) und
         # setzt das CRS dabei byte-exakt, kein Checkbox-Entscheid mehr noetig.
 
-        # SourceReferenceSystem (unveränderlich)
+        # SourceReferenceSystem (nicht editierbar, abhaengig von GDS/CameraSystem,
+        # siehe _source_ref_sys)
         ttk.Label(sec, text="SourceRefSys:", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
         srs_row = ttk.Frame(sec)
         srs_row.grid(row=r, column=1, sticky="w", padx=(8, 0), pady=3)
         srs_val = ttk.Label(srs_row, text=SOURCE_REF_SYS, font=("", 9, "bold"))
         srs_val.pack(side="left")
+        self._srs_val_lbl = srs_val
         srs_fix = ttk.Label(srs_row, text="  [Standard]", font=("", 8))
         srs_fix.pack(side="left")
         self._accent_labels.append(srs_val)
@@ -1381,7 +1469,8 @@ class GDWHApp(tk.Tk):
 
         # Line_ID – Listbox für mehrere IDs (SB_DOP / SB_DSM / SB_DSM_PUNKTWOLKE)
         self.lineid_w = LineIDWidget(sec, "Line_ID",
-            comment="alle LineIDs des AOI; die erste/oberste muss die erste beflogene Line_ID des AOI sein")
+            comment="alle LineIDs des AOI – werden chronologisch sortiert, die oberste ist die erste beflogene Linie",
+            camera_getter=self.camera_var.get)
         self.lineid_w.grid(row=r, column=0, columnspan=2, sticky="ew", pady=4)
 
         # Line_ID – einfaches Eingabefeld für SB_DOP_16 (genau 1 ID)
@@ -1411,6 +1500,7 @@ class GDWHApp(tk.Tk):
         sec = ttk.LabelFrame(parent, text="Pfade", padding=10, style="Section.TLabelframe")
         sec.pack(fill="x", pady=(0, 6))
         sec.columnconfigure(1, weight=1)
+        self._paths_sec = sec
         r = 0
 
         # Ziel (GDWH-BUCKET Path) – zuerst, damit das Zielpackage vor dem
@@ -1700,8 +1790,12 @@ class GDWHApp(tk.Tk):
         gds    = self.gds_var.get()
         is_d16 = (gds == "SB_DOP_16")
 
-        # CustomAttribute – fix per GDS
-        self.custom_var.set(GDS_CUSTOM_ATTR[gds])
+        # Sperre SB_DOP_16 + DMC-4 zuerst loesen, damit die Regeln unten auf den
+        # echten Widget-Zustaenden arbeiten (neu bewertet in _update_camera_meta_rules)
+        self._set_form_locked(False)
+
+        # CustomAttribute – fix per GDS (+ CameraSystem)
+        self.custom_var.set(self._custom_attribute())
 
         # Line_ID: einfaches Eingabefeld für SB_DOP_16, Listbox für alle anderen
         if is_d16:
@@ -1733,7 +1827,7 @@ class GDWHApp(tk.Tk):
         else:
             self.nodata_auto.grid_remove()
             self.nodata_lbl.grid()
-            opts = NODATA_D16_OPT if is_d16 else NODATA_DOP_OPT
+            opts, _ = self._nodata_options()
             self.nodata_cb.config(values=opts)
             if self.nodata_var.get() not in opts:
                 self.nodata_var.set(opts[0])
@@ -1770,8 +1864,98 @@ class GDWHApp(tk.Tk):
                 try: lbl.configure(foreground=T["hint"])
                 except tk.TclError: pass
 
+        self._update_camera_meta_rules()
         self._refresh_area_tilekey_preview()
         self._update_start_btn_state()
+
+    def _on_camera_change(self):
+        """CameraSystem gewechselt: NoData-, Meta- und LineID-Regeln neu anwenden."""
+        if not hasattr(self, "lineid_w"):
+            return
+        self._set_form_locked(False)
+        self._update_camera_nodata_rules()
+        removed = self.lineid_w.refresh_camera()
+        self._update_camera_meta_rules()
+        if removed:
+            messagebox.showwarning(
+                "Line_IDs entfernt",
+                f"Das LineID-Format hängt vom CameraSystem ab "
+                f"(jetzt: {_line_ids.format_hint(self.camera_var.get())}).\n\n"
+                f"Nicht passende Line_IDs wurden entfernt ({len(removed)}):\n"
+                + "\n".join(f"  {i}" for i in removed[:15])
+                + ("\n  …" if len(removed) > 15 else ""),
+                parent=self)
+
+    def _is_dop16_dmc(self):
+        """SB_DOP_16 gibt es mit Leica DMC-4 nicht (nur ADS-Einzellinien)."""
+        return self.gds_var.get() == "SB_DOP_16" and self.camera_var.get() == DMC_CAMERA
+
+    def _custom_attribute(self):
+        gds = self.gds_var.get()
+        if self.camera_var.get() == DMC_CAMERA and gds in GDS_CUSTOM_ATTR_DMC:
+            return GDS_CUSTOM_ATTR_DMC[gds]
+        return GDS_CUSTOM_ATTR[gds]
+
+    def _source_ref_sys(self):
+        """SB_DSM/SB_DSM_PUNKTWOLKE bleiben immer LV95_LN02 (Wertebereich GDWH)."""
+        if self.gds_var.get() == "SB_DOP" and self.camera_var.get() == DMC_CAMERA:
+            return SOURCE_REF_SYS_DOP_DMC
+        return SOURCE_REF_SYS
+
+    def _update_camera_meta_rules(self):
+        """Meta-Regeln, die vom CameraSystem abhaengen (NoData siehe
+        _update_camera_nodata_rules). Bei Leica DMC-4:
+          - TerrainModel fix 'Digital Surface Model (...)', gesperrt (alle GDS)
+          - SB_DOP: SourceRefSys nur EPSG:2056, CustomAttribute RGBN
+          - SB_DSM_PUNKTWOLKE: CustomAttribute mit RGB
+          - SB_DOP_16: gibt es nicht - Formular gesperrt, IMPORT STARTEN rot
+        Wird bei GDS- und CameraSystem-Wechsel aufgerufen."""
+        if not hasattr(self, "terrain_cb"):
+            return
+        if self.camera_var.get() == DMC_CAMERA:
+            self.terrain_var.set(DMC_TERRAIN_MODEL)
+            self.terrain_cb.config(state="disabled")
+            self.terrain_hint.grid()
+        else:
+            self.terrain_cb.config(state="readonly")
+            self.terrain_hint.grid_remove()
+        self.custom_var.set(self._custom_attribute())
+        self._srs_val_lbl.config(text=self._source_ref_sys())
+
+        blocked = self._is_dop16_dmc()
+        if blocked:
+            self.camera_block_lbl.grid()
+        else:
+            self.camera_block_lbl.grid_remove()
+        self._set_form_locked(blocked)
+        self._update_start_btn_state()
+
+    def _set_form_locked(self, locked):
+        """Sperrt alle Eingaben in 'Pfade' und 'Meta-Informationen' ausser dem
+        CameraSystem (sonst kaeme man aus der Sperre nicht mehr heraus) und stellt
+        beim Entsperren die vorherigen Zustaende wieder her. Die GDS-Auswahl liegt
+        ausserhalb dieser Bereiche und bleibt bedienbar."""
+        if locked == self._form_locked or not hasattr(self, "_meta_sec"):
+            return
+        self._form_locked = locked
+        if not locked:
+            for w, state in self._locked_states.items():
+                try: w.configure(state=state)
+                except tk.TclError: pass
+            self._locked_states = {}
+            return
+        stack = [self._paths_sec, self._meta_sec]
+        while stack:
+            w = stack.pop()
+            stack.extend(w.winfo_children())
+            if w is self.camera_cb or not isinstance(
+                    w, (ttk.Entry, ttk.Button, ttk.Checkbutton, tk.Button, tk.Listbox)):
+                continue
+            try:
+                self._locked_states[w] = str(w.cget("state")) or "normal"
+                w.configure(state="disabled")
+            except tk.TclError:
+                pass
 
     def _update_camera_nodata_rules(self):
         """NoData-Regeln, die vom CameraSystem abhaengen:
@@ -1779,7 +1963,7 @@ class GDWHApp(tk.Tk):
             Checkbox-Text): ausgeblendet ausser bei GDS SB_DOP UND CameraSystem
             != DMC-4. Bei DMC-4 wird die Option zusaetzlich aktiv deaktiviert
             (nicht nur versteckt), falls sie zuvor angehakt war.
-          - SB_DOP mit DMC-4: NoData immer '0 0 0', Dropdown gesperrt. Die
+          - SB_DOP mit DMC-4: NoData immer '0 0 0 0', Dropdown gesperrt. Die
             DMC-Pipeline (Reality Studio -> DMC-Converter) schreibt NoData immer
             schwarz, falsche NoData-Pixel in den Nutzdaten entstehen dort nicht.
         Wird sowohl bei GDS- als auch bei CameraSystem-Wechsel aufgerufen (siehe
@@ -1795,13 +1979,23 @@ class GDWHApp(tk.Tk):
             if is_dmc:
                 self.fix_nodata_var.set(False)
 
+        opts, _ = self._nodata_options()
         if gds == "SB_DOP" and is_dmc:
-            self.nodata_var.set(NODATA_DOP_OPT[0])
+            # Vier Werte, weil DMC-4 seit der RGBN-Umstellung 4-Band liefert. Die
+            # Wertzahl muss zur Bandzahl passen, sonst ueberspringen Script 1 den
+            # NoData-Tag UND die Flag Mask (beide pruefen Werte gegen Baender).
+            self.nodata_cb.config(values=opts)
+            self.nodata_var.set(opts[0])
             self.nodata_cb.config(state="disabled")
-            self.nodata_auto.config(text="DMC-4: NoData immer '0 0 0' (schwarz), keine Vorkorrektur nötig")
+            self.nodata_auto.config(
+                text="DMC-4: NoData immer '0 0 0 0' (schwarz, 4-Band RGBN), keine Vorkorrektur nötig")
             self.nodata_auto.grid()
         else:
-            self.nodata_cb.config(state="readonly")
+            # Zurueck auf die GDS-Auswahl - sonst blieben die DMC-Werte stehen,
+            # wenn man das CameraSystem wieder wechselt.
+            self.nodata_cb.config(values=opts, state="readonly")
+            if self.nodata_var.get() not in opts:
+                self.nodata_var.set(opts[0])
             # bei SB_DSM* traegt nodata_auto den Auto-Hinweis (siehe _on_gds_change)
             if gds in ("SB_DOP", "SB_DOP_16"):
                 self.nodata_auto.grid_remove()
@@ -2020,6 +2214,9 @@ class GDWHApp(tk.Tk):
         gds    = self.gds_var.get()
         errors = []
 
+        if self._is_dop16_dmc():
+            errors.append("SB_DOP_16 ist mit CameraSystem Leica DMC-4 nicht möglich.")
+
         if not self._osgeo_python or not os.path.isfile(self._osgeo_python):
             errors.append(
                 "OSGeo4W Python nicht gefunden.\n"
@@ -2044,6 +2241,11 @@ class GDWHApp(tk.Tk):
         else:
             if not self.lineid_w.get_ids():
                 errors.append("Mindestens eine Line_ID ist erforderlich.")
+            else:
+                try:
+                    _line_ids.normalize(self.lineid_w.get_ids(), self.camera_var.get())
+                except ValueError as e:
+                    errors.append(f"Line_ID – {e}")
             q = self.quelle_var.get().strip().strip('"')
             if not q:
                 errors.append("Quelle fehlt.")
@@ -2054,7 +2256,7 @@ class GDWHApp(tk.Tk):
             errors.append("Ziel fehlt.")
 
         if gds not in ("SB_DSM", "SB_DSM_PUNKTWOLKE"):
-            opts = NODATA_D16_OPT if gds == "SB_DOP_16" else NODATA_DOP_OPT
+            opts, _ = self._nodata_options()
             if self.nodata_var.get() not in opts:
                 errors.append(
                     "Input NoData: keine gültige Auswahl erkannt.\n"
@@ -2067,15 +2269,28 @@ class GDWHApp(tk.Tk):
             return False
         return True
 
+    def _nodata_options(self):
+        """Gueltige NoData-Auswahl (Beschriftungen, Werte) fuer die aktuelle
+        GDS-/CameraSystem-Kombination. Einzige Quelle fuer das Dropdown
+        (_on_gds_change, _update_camera_nodata_rules), die Validierung
+        (_validate) und den geschriebenen Wert (_get_nodata) - sonst laufen
+        die vier Stellen auseinander."""
+        gds = self.gds_var.get()
+        if gds == "SB_DOP" and self.camera_var.get() == DMC_CAMERA:
+            return NODATA_DMC_OPT, NODATA_DMC_VAL
+        if gds == "SB_DOP_16":
+            return NODATA_D16_OPT, NODATA_D16_VAL
+        return NODATA_DOP_OPT, NODATA_DOP_VAL
+
     def _get_nodata(self):
         gds  = self.gds_var.get()
         if gds in ("SB_DSM", "SB_DSM_PUNKTWOLKE"):
             return ""
         if gds == "SB_DOP" and self.camera_var.get() == DMC_CAMERA:
-            return NODATA_DOP_VAL[0]  # DMC-4: immer '0 0 0', siehe _update_camera_nodata_rules
+            # DMC-4: immer '0 0 0 0' (4-Band RGBN), siehe _update_camera_nodata_rules
+            return NODATA_DMC_VAL[0]
         val  = self.nodata_var.get()
-        opts = NODATA_D16_OPT if gds == "SB_DOP_16" else NODATA_DOP_OPT
-        vals = NODATA_D16_VAL if gds == "SB_DOP_16" else NODATA_DOP_VAL
+        opts, vals = self._nodata_options()
         if val not in opts:
             # _validate() prueft das bereits vor jedem Start (siehe dort) und
             # verhindert, dass wir hier ueberhaupt ankommen - kein stiller
@@ -2089,11 +2304,12 @@ class GDWHApp(tk.Tk):
         gds  = self.gds_var.get()
         meta = {
             "Auftragstyp":           self.auftragstyp_var.get(),
-            "CustomAttribute":       self.custom_var.get(),
+            "CustomAttribute":       self._custom_attribute(),
             "Line_ID":               ([self.lineid_single_var.get().strip()]
                                       if gds == "SB_DOP_16" else self.lineid_w.get_ids()),
-            "TerrainModel":          self.terrain_var.get(),
-            "SourceReferenceSystem": SOURCE_REF_SYS,
+            "TerrainModel":          (DMC_TERRAIN_MODEL if self.camera_var.get() == DMC_CAMERA
+                                      else self.terrain_var.get()),
+            "SourceReferenceSystem": self._source_ref_sys(),
             "CameraSystem":          self.camera_var.get(),
         }
         if gds == "SB_DOP_16":
@@ -2169,6 +2385,13 @@ class GDWHApp(tk.Tk):
         if self._running or not hasattr(self, "start_btn"):
             return
 
+        T = DARK if self._dark else LIGHT
+        if self._is_dop16_dmc():
+            # SB_DOP_16 + DMC-4: rot und deaktiviert, siehe _update_camera_meta_rules
+            self.start_btn.config(state="disabled", fg=T["err"], disabledforeground=T["err"],
+                                  bg=T["btn"], activebackground=T["btn_hover"])
+            return
+
         gds    = self.gds_var.get()
         quelle = (self.if_var.get() if gds == "SB_DOP_16" else self.quelle_var.get()).strip().strip('"')
         ziel   = self.ziel_var.get().strip().strip('"')
@@ -2189,7 +2412,6 @@ class GDWHApp(tk.Tk):
         else:
             ok = ok and bool(self.lineid_w.get_ids())
 
-        T = DARK if self._dark else LIGHT
         color = T["ok"] if ok else T["hint"]
         self.start_btn.config(
             state=("normal" if ok else "disabled"),
@@ -2208,7 +2430,7 @@ class GDWHApp(tk.Tk):
             ziel = self._pending_ziel or ""
             if self._pending_archive:
                 p = self._pending_archive
-                self._write_archive_log(p["gds"], p["area"], p["line_id"],
+                self._write_archive_log(p["gds"], p["area"], p["line_id"], p["stac_dt"],
                                         auftragstyp=p["auftragstyp"])
             self._pending_archive = None
             self._pending_ziel    = None
@@ -2352,27 +2574,20 @@ class GDWHApp(tk.Tk):
         return "—", "(keine passende Datei gefunden)"
 
     @staticmethod
-    def _format_stac_datetime(line_id):
-        """YYYYMMDD_HHMM_... → YYYY-MM-DDtHHMM0000  (identisch zu Sub-Script-Logik)"""
-        if line_id and len(line_id) >= 13:
-            return f"{line_id[0:4]}-{line_id[4:6]}-{line_id[6:8]}t{line_id[9:13]}0000"
-        return "—"
-
-    @staticmethod
     def _sanitize(text):
         """Macht einen String dateinamen-tauglich (keine Pfad-/Sonderzeichen)."""
         return re.sub(r'[^A-Za-z0-9_.-]', '_', str(text)).strip("_") or "UNKNOWN"
 
-    def _write_archive_log(self, gds, area, line_id, auftragstyp=""):
+    def _write_archive_log(self, gds, area, line_id, stac_dt, auftragstyp=""):
         """Haengt einen Eintrag an das fortlaufende Archiv-Log an.
 
         Format:  {stamp}  {GDS}_{AREA}_{Line_ID} = {STAC-Link}
+        stac_dt: StacItemIdDatetime, siehe _line_ids.stac_datetime
         """
         try:
             os.makedirs(LOG_DIR, exist_ok=True)
             archive_path = os.path.join(LOG_DIR, "GDWHimport_archived_AREA_proGDS.log")
             stamp     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            stac_dt   = self._format_stac_datetime(line_id)
             stac_link = (
                 "https://data.geo.admin.ch/browser/index.html#/collections/"
                 "ch.swisstopo.spezialbefliegungen/items/"
@@ -2414,12 +2629,13 @@ class GDWHApp(tk.Tk):
                 return
 
         # Sicherheitscheck
-        _first_lid = meta.get("Line_ID", [""])[0]
+        # StacItemIdDatetime der ersten Linie - dieselbe Regel wie das XML (Script 1)
+        stac_dt = _line_ids.stac_datetime(meta.get("Line_ID", []), meta.get("CameraSystem", ""))
         _tilekey, _tilekey_file = self._extract_tilekey_from_source(quelle, gds)
         dlg = SicherheitsCheckDialog(
             self, gds, meta, quelle_display, ziel,
             area=meta.get("AreaOverride") or self._extract_area_from_source(quelle, gds),
-            stac_dt=self._format_stac_datetime(_first_lid),
+            stac_dt=stac_dt,
             tilekey=_tilekey, tilekey_file=_tilekey_file,
             dark=self._dark,
         )
@@ -2456,6 +2672,7 @@ class GDWHApp(tk.Tk):
             "gds":         gds,
             "area":        area_s,
             "line_id":     line_s,
+            "stac_dt":     stac_dt,
             "auftragstyp": meta.get("Auftragstyp", ""),
         }
         self._pending_ziel = ziel

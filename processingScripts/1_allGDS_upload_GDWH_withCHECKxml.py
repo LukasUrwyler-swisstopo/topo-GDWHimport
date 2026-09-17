@@ -1,4 +1,5 @@
-print("\nVersion 2.6.1 (SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
+print("\nVersion 2.7.0 (Leica DMC-4: LineIDs fuers XML umgebaut (Gruppennummer, siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade und SB_DOP mit DMC-4 EPSG:2056 | "
+      "2.6.1: SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
 
 import os
 import re
@@ -10,11 +11,17 @@ import subprocess
 import tempfile
 import traceback
 import numpy as np
-from osgeo import gdal
+from osgeo import gdal, osr
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
+
+# LineID-Formate je CameraSystem: gemeinsames Modul mit der GUI (liegt daneben)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+import _line_ids
 
 # ****************************** Log-Funktion ******************************
 # Hinweis: Dieses Script gibt alles auf die Konsole aus. Beim Start via GUI
@@ -179,6 +186,35 @@ def format_first_acquisition(line_id):
     """Formatiert FirstAcquisitionTime mit Hundertstelsekunden (ISO8601)."""
     parsed = parse_line_id_to_hundredths(line_id)
     return format_iso8601_hundredths(parsed)
+
+def line_id_xml_fields(meta_info):
+    """
+    Alle von den LineIDs abhaengigen XML-Werte: LineID, AcquisitionTimes,
+    FirstAcquisitionTime, StacItemIdDatetime, BandID, Year (nur LAZ).
+
+    ADS: LineIDs unveraendert in Eingabe-Reihenfolge (die GUI sortiert bereits).
+    Leica DMC-4: Umbau, Sortierung und Gruppennummer siehe _line_ids.py - die
+    Zeiten kommen aus dem Linienstart der Eingabe (Sekunden, Hundertstel 00).
+    BandID ([9:13] der ersten XML-LineID) ist bei DMC damit die Gruppennummer.
+    """
+    line_ids = meta_info.get("Line_ID", [])
+    if not line_ids:
+        raise ValueError("Keine Line_ID angegeben!")
+    camera = meta_info.get("CameraSystem", "")
+    xml_ids = _line_ids.xml_line_ids(line_ids, camera)
+    if _line_ids.is_dmc(camera):
+        times = [_line_ids.dmc_acquisition(l) for l in _line_ids.normalize(line_ids, camera)]
+    else:
+        times = [parse_line_id_to_hundredths(l) for l in line_ids]
+    first = xml_ids[0]
+    return {
+        "LineID":               ",".join(xml_ids),
+        "AcquisitionTimes":     ",".join(format_iso8601_hundredths(t) for t in times),
+        "FirstAcquisitionTime": format_iso8601_hundredths(times[0]),
+        "StacItemIdDatetime":   format_stac_datetime(times[0]),
+        "BandID":               first[9:13] if len(first) >= 13 else "",
+        "Year":                 first[0:4],
+    }
 
 def wkt_footprint(full_file_path):
     if not full_file_path.lower().endswith(('.tif', '.tiff')):
@@ -533,6 +569,168 @@ def tag_mask_on_raster(file_path, nodata_str, rewrite_real_nodata_to_zero=False)
         ds = None
 
 
+# ****************************** Koordinatensystem (TIFF) ******************************
+# Soll-CRS im GeoTIFF-Tag:
+#   SB_DSM DSM: EPSG:2056+5728 - Hoehen in LN02. GDAL schreibt Compound-CRS als
+#     GeoTIFF 1.1 mit VerticalGeoKey (OGC 19-008r4).
+#   SB_DSM Hillshade: nur EPSG:2056 - reine Darstellung, keine Hoehenwerte (mit
+#     Hoehenbezug meldet GDAL sonst faelschlich 'Unit Type: metre').
+#   SB_DOP mit Leica DMC-4: nur EPSG:2056 - der Hoehenbezug der Orthorektifizierung
+#     (LHN95) gehoert nicht ins TIFF, im XML steht er nur als Text
+#     ('(EPSG:2056) CH1903+ / LV95_LHN95', analog LV95_LN02 der anderen GDS).
+# Alle anderen Faelle: keine Pruefung, Verhalten wie bisher.
+CRS_LV95      = "EPSG:2056"
+CRS_LV95_LN02 = "EPSG:2056+5728"
+
+# Grobe LV95-Ausdehnung (CH/FL, grosszuegig gepuffert) - nur fuer Kacheln OHNE
+# CRS-Tag: LV03-Koordinaten (6-stellig) fallen klar heraus.
+LV95_E_RANGE = (2_400_000, 2_900_000)
+LV95_N_RANGE = (1_000_000, 1_350_000)
+
+
+def tiff_crs_target(GDS, meta_info, filename=""):
+    """Soll-CRS im TIFF-Tag der Datei filename oder None (keine Pruefung)."""
+    if GDS == "SB_DSM":
+        # Hillshade-Erkennung wie get_nodata_value
+        return CRS_LV95 if "_hillshade_" in filename.lower() else CRS_LV95_LN02
+    if GDS == "SB_DOP" and _line_ids.is_dmc(meta_info.get("CameraSystem")):
+        return CRS_LV95
+    return None
+
+
+def _in_lv95_extent(gt, cols, rows):
+    corners = ((0, 0), (cols, 0), (0, rows), (cols, rows))
+    xs = [gt[0] + c * gt[1] + r * gt[2] for c, r in corners]
+    ys = [gt[3] + c * gt[4] + r * gt[5] for c, r in corners]
+    return (LV95_E_RANGE[0] <= min(xs) and max(xs) <= LV95_E_RANGE[1]
+            and LV95_N_RANGE[0] <= min(ys) and max(ys) <= LV95_N_RANGE[1])
+
+
+def read_crs_info(file_path):
+    """Liest das CRS eines TIFF (read-only) als Dict fuer decide_crs_action."""
+    ds = gdal.Open(file_path, gdal.GA_ReadOnly)
+    if ds is None:
+        raise FileNotFoundError(f"Konnte Raster nicht öffnen: {file_path}")
+    try:
+        srs = ds.GetSpatialRef()
+        in_extent = _in_lv95_extent(ds.GetGeoTransform(), ds.RasterXSize, ds.RasterYSize)
+    finally:
+        ds = None
+
+    info = {"has_crs": srs is not None, "in_lv95_extent": in_extent, "name": "",
+            "is_compound": False, "horizontal_is_lv95": False, "vertical_epsg": None}
+    if srs is None:
+        return info
+
+    lv95 = osr.SpatialReference()
+    lv95.ImportFromEPSG(2056)
+    info["name"] = srs.GetName() or ""
+    info["is_compound"] = bool(srs.IsCompound())
+    if not info["is_compound"]:
+        # IsSame statt EPSG-Code: auch ein gleichwertiges ESRI-WKT ohne ID gilt als LV95
+        info["horizontal_is_lv95"] = bool(srs.IsSame(lv95))
+        return info
+    if hasattr(srs, "StripVertical"):
+        horizontal = srs.Clone()
+        horizontal.StripVertical()
+        info["horizontal_is_lv95"] = bool(horizontal.IsSame(lv95))
+    else:
+        # GDAL < 3.6 kennt StripVertical nicht
+        info["horizontal_is_lv95"] = srs.GetAuthorityCode("PROJCS") == "2056"
+    info["vertical_epsg"] = srs.GetAuthorityCode("VERT_CS")
+    return info
+
+
+def decide_crs_action(info, target):
+    """
+    'ok' (Tag stimmt) oder 'set' (Tag setzen). ValueError, wenn das CRS im TIFF
+    dem Soll widerspricht: dann wird bewusst NICHT umgetaggt, sonst passten
+    Koordinaten und CRS nicht mehr zusammen (z.B. LV03-Daten als LV95 getaggt,
+    LHN95-Hoehen als LN02).
+    """
+    with_ln02 = target == CRS_LV95_LN02
+    if not info["has_crs"]:
+        if info["in_lv95_extent"]:
+            return "set"
+        raise ValueError(f"kein CRS im TIFF und Koordinaten ausserhalb LV95 - "
+                         f"{target} wird nicht gesetzt")
+    if not info["horizontal_is_lv95"]:
+        raise ValueError(f"CRS '{info['name']}' ist nicht LV95 (EPSG:2056)")
+    if not info["is_compound"]:
+        return "set" if with_ln02 else "ok"
+    if not with_ln02:
+        return "set"  # Hoehenbezug entfernen, siehe tiff_crs_target
+    if info["vertical_epsg"] == "5728":
+        return "ok"
+    raise ValueError(f"Hoehenbezug in '{info['name']}' ist nicht LN02 (EPSG:5728)")
+
+
+def set_raster_crs(file_path, target):
+    """Schreibt target als CRS-Tag - nur die GeoKeys, Pixel und Geotransformation
+    bleiben unveraendert. True, wenn das CRS danach dem Soll entspricht."""
+    srs = osr.SpatialReference()
+    srs.SetFromUserInput(target)
+    ds = gdal.Open(file_path, gdal.GA_Update)
+    if ds is None:
+        raise IOError(f"Konnte Raster nicht zum Schreiben oeffnen: {file_path}")
+    try:
+        if ds.SetSpatialRef(srs) != 0:
+            raise IOError(f"CRS konnte nicht gesetzt werden: {file_path}")
+    finally:
+        ds.FlushCache()
+        ds = None
+    try:
+        return decide_crs_action(read_crs_info(file_path), target) == "ok"
+    except ValueError:
+        return False
+
+
+def ensure_tiff_crs(src, files, GDS, meta_info):
+    """
+    Prueft den CRS-Tag aller TIFF (read-only) und setzt ihn danach, wo noetig
+    (siehe tiff_crs_target). Widerspricht auch nur eine Kachel dem Soll, bricht
+    der Lauf ab, BEVOR eine Datei veraendert wurde.
+
+    SB_DSM: laesst sich LN02 nicht ins TIFF schreiben (GDAL ohne GeoTIFF 1.1),
+    nur Warnung - der Hoehenbezug steht auch im XML und in der STAC-Beschreibung.
+    """
+    targets = {fn: tiff_crs_target(GDS, meta_info, fn) for fn in files
+               if fn.lower().endswith(('.tif', '.tiff'))}
+    targets = {fn: t for fn, t in targets.items() if t}
+    if not targets:
+        return
+
+    actions, errors = {}, []
+    for fn, target in targets.items():
+        try:
+            actions[fn] = decide_crs_action(read_crs_info(os.path.join(src, fn)), target)
+        except Exception as e:
+            errors.append(f"{fn} (Soll {target}): {e}")
+    if errors:
+        log("[FEHLER] CRS-Pruefung - Daten pruefen, es wurde nichts veraendert:")
+        for e in errors:
+            log("   - " + e)
+        sys.exit(1)
+
+    to_set = [fn for fn in targets if actions[fn] == "set"]
+    not_persisted = [fn for fn in to_set if not set_raster_crs(os.path.join(src, fn), targets[fn])]
+    for target in sorted(set(targets.values())):
+        group = [fn for fn in targets if targets[fn] == target]
+        n_set = sum(1 for fn in group if actions[fn] == "set")
+        log(f"CRS-Tag {target}: {len(group) - n_set} Datei(en) bereits korrekt, {n_set} gesetzt.")
+
+    ln02_failed  = [fn for fn in not_persisted if targets[fn] == CRS_LV95_LN02]
+    other_failed = [fn for fn in not_persisted if targets[fn] != CRS_LV95_LN02]
+    if ln02_failed:
+        log(f"[WARNUNG] LN02 (EPSG:5728) liess sich bei {len(ln02_failed)} Datei(en) nicht "
+            f"ins TIFF schreiben (GDAL {gdal.__version__}) - horizontal EPSG:2056 gesetzt, "
+            f"LN02 steht im XML: " + ", ".join(ln02_failed))
+    if other_failed:
+        log("[FEHLER] CRS konnte nicht gesetzt werden: " + ", ".join(other_failed))
+        sys.exit(1)
+    log("")
+
+
 # CRS-Tagging fuer SB_DSM_PUNKTWOLKE LAZ-Tiles gibt es hier nicht mehr - das
 # uebernimmt jetzt vollstaendig die LAS 1.2 -> LAS 1.4 Vorkonversion
 # (4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py), die in _osgeo_runner.py IMMER vor
@@ -599,12 +797,17 @@ def preview_xml_attributes(src, GDS, meta_info):
         print("NoData: <LAZ hat kein noData-Value>")
         print("CRS-Zuweisung: bereits durch die LAS 1.2 -> LAS 1.4 Vorkonversion "
               "(4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py) erledigt (EPSG:2056+5728, siehe Log davor).")
+    if GDS == "SB_DSM":
+        print(f"TIFF-CRS: wird geprueft und bei Bedarf gesetzt, Soll DSM {CRS_LV95_LN02}, "
+              f"Hillshade {CRS_LV95}")
+    elif tiff_crs_target(GDS, meta_info):
+        print(f"TIFF-CRS: wird geprueft und bei Bedarf gesetzt, Soll {tiff_crs_target(GDS, meta_info)}")
 
-    line_ids = meta_info.get("Line_ID", [])
-    print(",".join(line_ids))
-
-    if line_ids:
-        print(format_first_acquisition(line_ids[0]))
+    # Wirft bei ungueltigen LineIDs (z.B. DMC-Format bei ADS) - Abbruch vor der Verarbeitung
+    fields = line_id_xml_fields(meta_info)
+    print(f"LineID (XML): {fields['LineID']}")
+    print(f"FirstAcquisitionTime: {fields['FirstAcquisitionTime']}")
+    print(f"StacItemIdDatetime: {fields['StacItemIdDatetime']}")
 
     print("\n============================================================\n")
 
@@ -641,29 +844,13 @@ def create_xml(file_path, GDS, meta_info, cached_raster_attrs=None):
         ET.SubElement(root, "NoData").text = normalize_nodata_for_output(
             GDS, get_nodata_value(filename, GDS, meta_info))
 
-    line_ids = meta_info.get("Line_ID", [])
-    if not line_ids:
-        raise ValueError("Keine Line_ID angegeben!")
-    ET.SubElement(root, "LineID").text = ",".join(line_ids)
-
-    # AcquisitionTimes mit Hundertstelsekunden
-    acq_times = []
-    for l in line_ids:
-        parsed = parse_line_id_to_hundredths(l)
-        acq_times.append(format_iso8601_hundredths(parsed))
-    ET.SubElement(root, "AcquisitionTimes").text = ",".join(acq_times)
-
-    # FirstAcquisitionTime mit Hundertstelsekunden
-    first_line = line_ids[0]
-    first_parsed = parse_line_id_to_hundredths(first_line)
-    first_time = format_iso8601_hundredths(first_parsed)
-    ET.SubElement(root, "FirstAcquisitionTime").text = first_time
-
-    # StacItemIdDatetime: z.B. 2023-08-20t09210000
-    ET.SubElement(root, "StacItemIdDatetime").text = format_stac_datetime(first_parsed)
-
-    if len(first_line) >= 13:
-        ET.SubElement(root, "BandID").text = first_line[9:13]
+    # LineID-abhaengige Werte (ADS/DMC-4), Zeiten mit Hundertstelsekunden,
+    # StacItemIdDatetime z.B. 2023-08-20t09210000
+    fields = line_id_xml_fields(meta_info)
+    for key in ("LineID", "AcquisitionTimes", "FirstAcquisitionTime", "StacItemIdDatetime"):
+        ET.SubElement(root, key).text = fields[key]
+    if fields["BandID"]:
+        ET.SubElement(root, "BandID").text = fields["BandID"]
 
     if file_path.lower().endswith(('.tif', '.tiff')):
         attrs = cached_raster_attrs if cached_raster_attrs is not None else get_raster_attributes(file_path)
@@ -671,14 +858,14 @@ def create_xml(file_path, GDS, meta_info, cached_raster_attrs=None):
             ET.SubElement(root, k).text = v
     elif file_path.lower().endswith('.laz'):
         # Year aus Line_ID ableiten (erste 4 Ziffern = Jahr)
-        ET.SubElement(root, "Year").text = first_line[0:4] if first_line else "UNKNOWN"
+        ET.SubElement(root, "Year").text = fields["Year"]
 
     xml_path = file_path.rsplit('.', 1)[0] + ".xml"
     pretty = minidom.parseString(ET.tostring(root, 'utf-8')).toprettyxml(indent="    ")
     pretty = "\n".join([line for line in pretty.split("\n") if line.strip() != ""])
     with open(xml_path, 'w', encoding='utf-8') as f:
         f.write(pretty)
-    return xml_path, AOI, first_time
+    return xml_path, AOI, fields["FirstAcquisitionTime"]
 
 # ****************************** CSV & Kopieren ******************************
 def _csv_append(csv_path, row):
@@ -923,6 +1110,10 @@ def files_in_order(src, out, GDS, meta, workers=None):
         and fn.lower().endswith(('.tif', '.tiff', '.laz'))
     ]
 
+    # CRS-Tag pruefen/setzen (SB_DSM, SB_DOP mit DMC-4) - bricht ab, bevor eine
+    # Kachel veraendert wird, falls eine dem Soll widerspricht
+    ensure_tiff_crs(src, files, GDS, meta)
+
     # Für Kacheldatensätze: Raster-Attribute nur einmal lesen und für alle XML wiederverwenden.
     # SB_DSM muss weiterhin jede Datei einzeln öffnen (unterschiedliche Dimensionen/Typen).
     cached_attrs = None
@@ -1081,11 +1272,17 @@ if __name__ == "__main__":
             # "Digital Surface Model  - Raster Mosaic (DSM photogrammetric autocorrelation)"
             # "Digital Surface Model - PointCloud LAZ (DSM photogrammetric autocorrelation)"
             # "Digital OrthoPhoto - Mosaic RGB 8BIT"
+            # Leica DMC-4:
+            # "Digital OrthoPhoto - Mosaic RGBN 8BIT"
+            # "Digital Surface Model - PointCloud LAZ RGB (DSM photogrammetric autocorrelation)"
         "Line_ID": ["20200913_1054_12501", "20200913_1104_12501"],
             # kontrollieren;
             # (!)Alle LineIDs(!) des Mosaiks angeben!
-            # erste LineID (!)muss(!) die erste BefliegungsLinie (AufnahmeZeitpunkt) des AOIs sein!
+            # ADS: erste LineID (!)muss(!) die erste BefliegungsLinie (AufnahmeZeitpunkt) des AOIs sein!
             #(z.B.: "20200821_0952_12504", "20200821_1009_12504", "20200821_1026_12504")
+            # Leica DMC-4: Format YYYYMMDD_LLL_HHMMSS_BBB_QQQQQ, Reihenfolge egal
+            # (wird sortiert und fuers XML umgebaut, siehe _line_ids.py)
+            #(z.B.: "20260813_003_082221_001_41216", "20260813_004_082750_012_41216")
         "NoData": "0 0 0",
             # kontrollieren! Typische Werte:
             # "0 0 0"    /   "255 255 255"   (8BIT, 3-Band RGB TIF)
@@ -1103,6 +1300,7 @@ if __name__ == "__main__":
         "SourceReferenceSystem": "(EPSG:2056) CH1903+ / LV95_LN02",
             # INPUT kontrollieren! only possible Value:
             # ("EPSG:2056) CH1903+ / LV95_LN02"
+            # Ausnahme SB_DOP mit Leica DMC-4: "(EPSG:2056) CH1903+ / LV95_LHN95"
         "CameraSystem": "Leica ADS100",
             # kontrollieren;
             # "Leica ADS100"

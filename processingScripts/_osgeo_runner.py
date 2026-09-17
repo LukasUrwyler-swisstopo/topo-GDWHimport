@@ -244,9 +244,9 @@ def _cleanup_staging(job_dir):
 # temporaeren Scratch-Ordner, dessen Pfad als neue proc_quelle fuer Script 1
 # weiterverwendet wird.
 
-# Kamerasysteme mit Farbe in der Punktwolke: Kacheln mit RGB-Werten werden dort
-# als PF7 statt PF6 geschrieben (siehe choose_target_point_format in Script 4).
-# Wert wie in CAMERA_SYSTEMS der GUI.
+# Kamerasysteme mit Farbe in der Punktwolke: Kacheln werden dort als PF7 statt
+# PF6 geschrieben, RGB-Werte sind Pflicht (siehe choose_target_point_format in
+# Script 4). Wert wie in CAMERA_SYSTEMS der GUI.
 RGB_CAMERA_SYSTEMS = ("Leica DMC-4",)
 
 
@@ -256,9 +256,9 @@ def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir, keep_r
     wenn auch nur eine Kachel fehlschlaegt - eine nicht korrekt konvertierte
     Punktwolke soll nicht unbemerkt weiter nach GDWH gelangen.
 
-    keep_rgb=True (CameraSystem in RGB_CAMERA_SYSTEMS): Kacheln mit RGB-Werten
-    werden PF7, ohne RGB-Werte PF6. keep_rgb=False (ADS): immer PF6, eine
-    Kachel mit RGB-Werten schlaegt fehl und bricht damit den Lauf ab.
+    keep_rgb=True (CameraSystem in RGB_CAMERA_SYSTEMS): immer PF7, eine Kachel
+    ohne RGB-Werte schlaegt fehl. keep_rgb=False (ADS): immer PF6, eine Kachel
+    mit RGB-Werten schlaegt fehl. Beides bricht den Lauf ab.
 
     Der Scratch-Ordner fuer die konvertierten Tiles liegt innerhalb
     staging_root_dir (i.d.R. job_dir - selbe schnelle lokale Platte wie die
@@ -271,7 +271,7 @@ def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir, keep_r
     scratch_dir = tempfile.mkdtemp(prefix="SB_DSM_PUNKTWOLKE_LAS14_", dir=(staging_root_dir or None))
 
     print("\n=== LAS 1.2 -> LAS 1.4 Vorkonversion (Script 4) ===\n", flush=True)
-    print("Zielformat: " + ("PF7 fuer Kacheln mit RGB-Werten, sonst PF6 (CameraSystem mit Farbe)"
+    print("Zielformat: " + ("PF7 (CameraSystem mit Farbe, Kachel ohne RGB-Werte = Abbruch)"
                             if keep_rgb else "PF6 (RGB-Werte in einer Kachel = Abbruch)") + "\n",
           flush=True)
     summary = mod4.convert_folder(quelle_dir, scratch_dir, recursive=False,
@@ -356,6 +356,10 @@ def main():
                     mod.log_file.close()
 
         elif action == "dop16":
+            # SB_DOP_16 gibt es mit Leica DMC-4 nicht (GUI sperrt das bereits)
+            if meta.get("CameraSystem") in RGB_CAMERA_SYSTEMS:
+                raise ValueError("SB_DOP_16 ist mit CameraSystem "
+                                 f"'{meta.get('CameraSystem')}' nicht moeglich - Import abgebrochen.")
             # Script 2_2 (SB_DOP_16)
             mod = _lade_modul("script_22", cfg["script_22"])
             print("=== Sicherheitsvorschau ===", flush=True)

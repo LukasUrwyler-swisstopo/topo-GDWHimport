@@ -9,10 +9,10 @@ abgeleitete DSM-Punktwolken aus Autokorrelation, ADS100-Luftbildstreifen).
 Hebt die Quell-Tiles von LAS 1.2 (Point Data Record Format 1, keine CRS-
 Angabe im Header) auf LAS 1.4 (Point Data Record Format 6, CRS-Tag LV95/LN02)
 an, damit sie strukturell kongruent zu swissSURFACE3D sind und in den GDWH
-importiert werden koennen. Einzige Abweichung: Kacheln mit echten RGB-Werten
-aus einem Kamerasystem mit Farbe (Leica DMC-4, keep_rgb=True bzw. --keep-rgb)
-werden als PF7 (= PF6 + RGB) geschrieben, damit die Farbe bis ins GDWH-Produkt
-erhalten bleibt (siehe choose_target_point_format). Laeuft VOR dem
+importiert werden koennen. Einzige Abweichung: Punktwolken aus einem
+Kamerasystem mit Farbe (Leica DMC-4, keep_rgb=True bzw. --keep-rgb) werden als
+PF7 (= PF6 + RGB) geschrieben, damit die Farbe bis ins GDWH-Produkt erhalten
+bleibt - RGB ist dort Pflicht (siehe choose_target_point_format). Laeuft VOR dem
 eigentlichen GDWH-Import
 (1_allGDS_upload_GDWH_withCHECKxml.py); dieses Skript schreibt ausschliesslich
 in ein separates Zielverzeichnis, die Quelldateien bleiben unveraendert.
@@ -25,9 +25,9 @@ Vorgehen pro Tile (siehe Docstrings der einzelnen Funktionen fuer Details):
      Vorfilter. Punkte ausserhalb des Rahmens sind ein Datenfehler der
      Quelle und brechen die Kachel ab, sie werden NICHT zugeschnitten (siehe
      check_tile_frame_plausibility, Vorfall 14.9.2026, Job RHONE 2017).
-  2. Zielformat bestimmen (choose_target_point_format): PF7 nur bei
-     keep_rgb=True UND echten RGB-Werten in der Quelle, sonst PF6. RGB-Werte
-     bei keep_rgb=False (ADS) sind ein harter Fehler. Die Farbkanaele werden
+  2. Zielformat bestimmen (choose_target_point_format): keep_rgb=True (DMC-4)
+     -> PF7, eine Kachel ohne RGB-Werte ist dann ein harter Fehler.
+     keep_rgb=False (ADS) -> PF6, RGB-Werte sind ein harter Fehler. Die Farbkanaele werden
      nur gescannt, wenn das Punktformat der Quelle ueberhaupt RGB fuehrt.
   3. Bereits migrierte Tiles (LAS 1.4 im Zielformat, CRS korrekt,
      global_encoding 17) werden erkannt und nur unveraendert kopiert, nicht
@@ -128,7 +128,7 @@ def log(message):
 # ****************************** Zielwerte / Konstanten ******************************
 TARGET_MINOR_VERSION = 4
 TARGET_POINT_FORMAT = 6        # Standard, farblos (wie swissSURFACE3D)
-TARGET_POINT_FORMAT_RGB = 7    # PF6 + RGB, nur bei keep_rgb (DMC-4), siehe choose_target_point_format
+TARGET_POINT_FORMAT_RGB = 7    # PF6 + RGB, bei keep_rgb (DMC-4) Pflicht, siehe choose_target_point_format
 TARGET_POINT_LENGTHS = {TARGET_POINT_FORMAT: 30, TARGET_POINT_FORMAT_RGB: 36}
 TARGET_HEADER_SIZE = 375
 TARGET_GLOBAL_ENCODING = 17  # Bit 0 (Adjusted Standard GPS Time) + Bit 4 (WKT)
@@ -490,17 +490,26 @@ def has_rgb_values(rgb_ranges):
 
 def choose_target_point_format(rgb_ranges, keep_rgb, filename):
     """Zielformat einer Kachel:
-      - keine RGB-Werte (kein Farbfeld oder lauter Nullen) -> PF6
-      - RGB-Werte und keep_rgb=True (CameraSystem DMC-4)   -> PF7
-      - RGB-Werte und keep_rgb=False (ADS)                 -> ValueError
+      - RGB-Werte und keep_rgb=True (CameraSystem DMC-4)          -> PF7
+      - keine RGB-Werte und keep_rgb=False (ADS)                  -> PF6
+      - keine RGB-Werte (kein Farbfeld oder lauter Nullen), DMC-4 -> ValueError
+      - RGB-Werte und keep_rgb=False (ADS)                        -> ValueError
+    DMC-Punktwolken haben immer Farbe, das XML nennt sie im CustomAttribute
+    ("PointCloud LAZ RGB") - eine farblose Kachel widerspraeche dem Produkt.
     ADS liefert nie Farbe. Fuehrt eine Kachel trotzdem RGB-Werte, stammt sie
     vermutlich aus einem DMC-Auftrag und das CameraSystem im GUI ist falsch
     gewaehlt - ohne Abbruch ginge die Farbe still verloren und die Metadaten
     nennten die falsche Kamera."""
+    if keep_rgb:
+        if has_rgb_values(rgb_ranges):
+            return TARGET_POINT_FORMAT_RGB
+        raise ValueError(
+            f"{filename}: CameraSystem mit Farbe (DMC-4) gewaehlt, die Quelle fuehrt aber "
+            f"keine RGB-Werte - DMC-Punktwolken muessen RGB haben (PF7). "
+            f"Quelldaten bzw. CameraSystem pruefen."
+        )
     if not has_rgb_values(rgb_ranges):
         return TARGET_POINT_FORMAT
-    if keep_rgb:
-        return TARGET_POINT_FORMAT_RGB
     raise ValueError(
         f"{filename}: Quelle fuehrt RGB-Werte, das CameraSystem ist aber ohne Farbe "
         f"(ADS liefert nie RGB) - CameraSystem pruefen (DMC-4?)."
@@ -768,8 +777,8 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=F
       {"status": "ok" | "skipped_already_migrated" | "warning" | "failed",
        "warnings": [...], "error": str oder None,
        "point_format": 6 | 7 | None (None = vor der Formatwahl gescheitert)}
-    keep_rgb=True (CameraSystem mit Farbe, DMC-4): Kacheln mit RGB-Werten
-    werden PF7, sonst PF6 - siehe choose_target_point_format.
+    keep_rgb=True (CameraSystem mit Farbe, DMC-4): PF7, Kachel ohne RGB-Werte
+    schlaegt fehl - siehe choose_target_point_format.
     Original wird NIE veraendert. Ziel wird nur bei vollstaendigem Erfolg
     atomar geschrieben (os.replace) - bei jedem Fehler bleibt eine evtl.
     vorhandene Zieldatei unangetastet.
@@ -816,10 +825,6 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=F
         result["error"] = str(e)
         return result
     result["point_format"] = point_format
-    if keep_rgb and point_format == TARGET_POINT_FORMAT:
-        result["warnings"].append(
-            f"{name}: CameraSystem mit Farbe gewaehlt, die Quelle fuehrt aber keine "
-            f"RGB-Werte - Ziel PF{TARGET_POINT_FORMAT} (ohne Farbe).")
 
     # Veralteter Header (siehe check_tile_frame_plausibility): auch eine bereits
     # migrierte Kachel neu schreiben lassen, damit PDAL die BBox korrigiert.
@@ -1020,7 +1025,7 @@ def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
     koennen, ganz ohne das Pickling-/Modul-Identitaetsproblem.
 
     keep_rgb=True, wenn im GUI ein CameraSystem mit Farbe gewaehlt ist
-    (DMC-4): Kacheln mit RGB-Werten werden PF7, ohne RGB-Werte PF6. Bei
+    (DMC-4): alle Kacheln PF7, eine Kachel ohne RGB-Werte ist ein Fehler. Bei
     keep_rgb=False (ADS) sind RGB-Werte in einer Kachel ein Fehler, siehe
     choose_target_point_format.
 
@@ -1091,8 +1096,8 @@ def main():
                               "gegenueber der Quelle mit Scale 0.001, siehe Modul-Docstring)")
     parser.add_argument("--log-file", help="Pfad fuer die Log-Datei (Default: <output-dir>/logs/...)")
     parser.add_argument("--keep-rgb", action="store_true",
-                         help="CameraSystem mit Farbe (Leica DMC-4): Kacheln mit RGB-Werten als PF7 "
-                              "schreiben, ohne RGB-Werte als PF6. Ohne diese Option immer PF6, "
+                         help="CameraSystem mit Farbe (Leica DMC-4): alle Kacheln als PF7 schreiben, "
+                              "eine Kachel ohne RGB-Werte ist ein Fehler. Ohne diese Option immer PF6, "
                               "RGB-Werte in einer Kachel sind dann ein Fehler (ADS liefert nie Farbe).")
     parser.add_argument("--workers", type=int, default=None,
                          help="Anzahl gleichzeitig verarbeiteter Kacheln (Default: automatisch, "
@@ -1123,7 +1128,7 @@ def main():
     log(f"Input:  {args.input_dir}  (rekursiv: {args.recursive})")
     log(f"Output: {args.output_dir}")
     log(f"Ziel-Scale: {args.target_scale} m  (Quelle: 0.001 m - verlustbehaftete Rundung, siehe Docstring)")
-    log(f"Farbe: {'PF7 fuer Kacheln mit RGB-Werten, sonst PF6 (--keep-rgb)' if args.keep_rgb else 'PF6, RGB-Werte in einer Kachel = Fehler'}")
+    log(f"Farbe: {'PF7, Kachel ohne RGB-Werte = Fehler (--keep-rgb)' if args.keep_rgb else 'PF6, RGB-Werte in einer Kachel = Fehler'}")
     log(f"Dry-Run: {args.dry_run}")
     log(f"Worker: {args.workers if args.workers else f'automatisch ({_default_worker_count()} von {os.cpu_count()} Kernen)'}\n")
 
