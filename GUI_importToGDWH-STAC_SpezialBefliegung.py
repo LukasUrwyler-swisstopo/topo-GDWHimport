@@ -387,6 +387,15 @@ class LineIDWidget(ttk.LabelFrame):
         return {_line_ids.line_key(i, cam) for i in self.lb.get(0, "end")
                 if _line_ids.is_valid(i, cam)}
 
+    def _existing_area_key(self):
+        """Datum_Gruppe_Serie der bereits erfassten LineIDs (DMC-4), sonst None.
+        Alle Linien einer Area müssen darin übereinstimmen."""
+        cam = self._camera()
+        for i in self.lb.get(0, "end"):
+            if _line_ids.is_valid(i, cam):
+                return _line_ids.area_key(i, cam)
+        return None
+
     def _add_one(self, val):
         """Fügt eine einzelne validierte LineID zur Liste hinzu. Gibt True zurück bei Erfolg."""
         cam = self._camera()
@@ -401,8 +410,15 @@ class LineIDWidget(ttk.LabelFrame):
                 parent=self)
             return False
         if _line_ids.line_key(val, cam) in self._existing_line_keys():
-            # DMC-4: auch ein anderes Bild derselben Linie gilt als Duplikat
             messagebox.showwarning("Duplikat", f"Linie bereits erfasst: {val}", parent=self)
+            return False
+        expected_area = self._existing_area_key()
+        if expected_area is not None and _line_ids.area_key(val, cam) != expected_area:
+            messagebox.showwarning("Andere Area",
+                f"Alle Line_IDs einer Area müssen in Datum, Gruppennummer und "
+                f"Kamera-Seriennummer übereinstimmen.\n\n"
+                f"Erwartet: {expected_area}_HHMMSS\nEingabe:  {val}",
+                parent=self)
             return False
         self.lb.insert("end", val)
         self._resort()
@@ -436,14 +452,19 @@ class LineIDWidget(ttk.LabelFrame):
         cam = self._camera()
         added, skipped = [], []
         existing = self._existing_line_keys()
+        expected_area = self._existing_area_key()
         for line in lines:
             if not _line_ids.is_valid(line, cam):
                 skipped.append(f"  {line}  →  falsches Format")
             elif _line_ids.line_key(line, cam) in existing:
                 skipped.append(f"  {line}  →  Duplikat (Linie bereits erfasst)")
+            elif expected_area is not None and _line_ids.area_key(line, cam) != expected_area:
+                skipped.append(f"  {line}  →  andere Area (erwartet {expected_area}_HHMMSS)")
             else:
                 self.lb.insert("end", line)
                 existing.add(_line_ids.line_key(line, cam))
+                if expected_area is None:
+                    expected_area = _line_ids.area_key(line, cam)
                 added.append(line)
         if added:
             self._resort()
@@ -463,7 +484,7 @@ class LineIDWidget(ttk.LabelFrame):
 
     def _resort(self):
         """Sortiert die Liste chronologisch, älteste zuoberst - bei DMC-4 nach
-        Datum + Linienstart, nicht nach Liniennummer (siehe _line_ids.sort_key)."""
+        Datum + Linienstart (siehe _line_ids.sort_key)."""
         cam = self._camera()
         try:
             ids = sorted(self.lb.get(0, "end"), key=lambda i: _line_ids.sort_key(i, cam))
@@ -620,14 +641,10 @@ class SicherheitsCheckDialog(tk.Toplevel):
         _kv(sec1, "STAC ITEM - Name:", stac_dt)
         _kv(sec1, "Auftragstyp:", meta.get("Auftragstyp", ""))
         _kv(sec1, "CustomAttribute:", meta.get("CustomAttribute", ""))
+        # Die Line_IDs gehen bei beiden Kamerasystemen unveraendert ins XML
+        # (nur chronologisch sortiert) - keine separate XML-Zeile noetig.
         _kv(sec1, "Line_ID:", ", ".join(meta.get("Line_ID", [])))
         is_dmc = meta.get("CameraSystem") == DMC_CAMERA
-        if is_dmc:
-            try:
-                xml_ids = ", ".join(_line_ids.xml_line_ids(meta.get("Line_ID", []), DMC_CAMERA))
-            except ValueError as e:
-                xml_ids = f"FEHLER – {e}"
-            _kv(sec1, "LineID (XML):", xml_ids)
         if "allAreaLineIDs" in meta:
             _kv(sec1, "allAreaLineIDs:", ", ".join(meta["allAreaLineIDs"]))
         if gds == "SB_DSM":

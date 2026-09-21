@@ -1300,13 +1300,13 @@ class TestDmcNodataGuiRegeln(_GuiAppTestCase):
 
 # ============================================================
 #  LineIDs Leica DMC-4  (_line_ids.py, Script 1)
-#  Eingabe YYYYMMDD_LLL_HHMMSS_BBB_QQQQQ -> XML YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS,
-#  GGGG = HHMM der ersten beflogenen Linie (Gruppennummer)
+#  Eingabe = XML: YYYYMMDD_GGGG_QQQQQ_HHMMSS
+#  GGGG = Gruppennummer (HHMM der ersten beflogenen Linie), QQQQQ = Seriennummer
 # ============================================================
 DMC = "Leica DMC-4"
 ADS = "Leica ADS100"
-_DMC_003 = "20260813_003_082221_076_41216"
-_DMC_004 = "20260813_004_082750_012_41216"
+_DMC_003 = "20260813_0822_41216_082221"   # frueheste Linie der Gruppe 0822
+_DMC_004 = "20260813_0822_41216_082750"
 
 
 class TestLineIdsDmc(unittest.TestCase):
@@ -1318,24 +1318,41 @@ class TestLineIdsDmc(unittest.TestCase):
         self.assertFalse(lineids.is_valid("20200821_0952_12504", DMC))
         self.assertFalse(lineids.is_valid(_DMC_003 + ".tif", DMC))
 
-    def test_beispiele_gruppennummer_der_ersten_linie(self):
-        # Eingabe in falscher Reihenfolge - beide bekommen die Gruppe 0822
+    def test_lineids_gehen_unveraendert_ins_xml(self):
+        # Eingabe in falscher Reihenfolge - Inhalt bleibt, nur sortiert
         self.assertEqual(lineids.xml_line_ids([_DMC_004, _DMC_003], DMC),
-                         ["20260813_0822_41216_003_082221", "20260813_0822_41216_004_082750"])
-
-    def test_einzelne_linie_eigene_gruppe(self):
-        self.assertEqual(lineids.xml_line_ids([_DMC_004], DMC),
-                         ["20260813_0827_41216_004_082750"])
-
-    def test_anderes_bild_derselben_linie_ist_duplikat(self):
-        other_image = "20260813_004_082750_014_41216"
-        self.assertEqual(lineids.normalize([_DMC_004, other_image, _DMC_003], DMC),
                          [_DMC_003, _DMC_004])
 
-    def test_sortierung_nach_zeit_nicht_nach_liniennummer(self):
-        frueh_hohe_nummer = "20260813_005_081000_001_41216"
-        self.assertEqual(lineids.xml_line_ids([_DMC_003, frueh_hohe_nummer], DMC),
-                         ["20260813_0810_41216_005_081000", "20260813_0810_41216_003_082221"])
+    def test_einzelne_linie_unveraendert(self):
+        self.assertEqual(lineids.xml_line_ids([_DMC_004], DMC), [_DMC_004])
+
+    def test_doppelte_lineid_ist_duplikat(self):
+        self.assertEqual(lineids.normalize([_DMC_004, _DMC_004, _DMC_003], DMC),
+                         [_DMC_003, _DMC_004])
+
+    def test_sortierung_nach_linienstart(self):
+        frueher = "20260813_0822_41216_081000"
+        self.assertEqual(lineids.xml_line_ids([_DMC_003, frueher], DMC),
+                         [frueher, _DMC_003])
+
+    def test_fremde_gruppe_oder_seriennummer_wirft(self):
+        for fremd in ("20260813_0915_41216_091530",   # andere Gruppe
+                      "20260813_0822_41299_082900",   # andere Seriennummer
+                      "20260814_0822_41216_082900"):  # anderes Datum
+            with self.assertRaises(ValueError):
+                lineids.normalize([_DMC_003, fremd], DMC)
+
+    def test_band_id_kommt_aus_dem_linienstart_nicht_aus_der_gruppe(self):
+        # Gruppennummer 0822, Linienstart 084617 -> BandID 0846
+        self.assertEqual(lineids.band_id("20260813_0822_41216_084617", DMC), "0846")
+        self.assertEqual(lineids.band_id("20260813_0822_41216_085104", DMC), "0851")
+        self.assertEqual(lineids.band_id("20260813_0822_41216_082221", DMC), "0822")
+        self.assertEqual(lineids.band_id("20260813_0822_41216_082750", DMC), "0827")
+        self.assertEqual(lineids.band_id("20200821_0952_12504", ADS), "0952")
+
+    def test_area_key(self):
+        self.assertEqual(lineids.area_key(_DMC_003, DMC), "20260813_0822_41216")
+        self.assertIsNone(lineids.area_key("20200821_0952_12504", ADS))
 
     def test_ungueltige_id_wirft(self):
         with self.assertRaises(ValueError):
@@ -1355,12 +1372,21 @@ class TestLineIdXmlFields(unittest.TestCase):
 
     def test_dmc_alle_abhaengigen_werte(self):
         f = allGDS.line_id_xml_fields({"Line_ID": [_DMC_004, _DMC_003], "CameraSystem": DMC})
-        self.assertEqual(f["LineID"], "20260813_0822_41216_003_082221,20260813_0822_41216_004_082750")
+        self.assertEqual(f["LineID"], "20260813_0822_41216_082221,20260813_0822_41216_082750")
         self.assertEqual(f["AcquisitionTimes"], "2026-08-13T08:22:21.00,2026-08-13T08:27:50.00")
         self.assertEqual(f["FirstAcquisitionTime"], "2026-08-13T08:22:21.00")
         self.assertEqual(f["StacItemIdDatetime"], "2026-08-13t08222100")
         self.assertEqual(f["BandID"], "0822")
         self.assertEqual(f["Year"], "2026")
+
+    def test_dmc_band_id_bei_teilmenge_weicht_von_der_gruppe_ab(self):
+        # Nur die spaeteren Linien importiert: Gruppe bleibt 0822, BandID = 0846
+        ids = ["20260813_0822_41216_085104", "20260813_0822_41216_084617"]
+        f = allGDS.line_id_xml_fields({"Line_ID": ids, "CameraSystem": DMC})
+        self.assertEqual(f["BandID"], "0846")
+        self.assertEqual(f["FirstAcquisitionTime"], "2026-08-13T08:46:17.00")
+        self.assertEqual(f["StacItemIdDatetime"], "2026-08-13t08461700")
+        self.assertEqual(f["LineID"], "20260813_0822_41216_084617,20260813_0822_41216_085104")
 
     def test_ads_wie_bisher(self):
         f = allGDS.line_id_xml_fields({"Line_ID": ["20200913_1054_12501", "20200913_1104_12501"],
@@ -1385,7 +1411,7 @@ class TestLineIdXmlFields(unittest.TestCase):
         xml_path, _, first = allGDS.create_xml(tif, "SB_DOP", meta, cached_raster_attrs={})
         with open(xml_path, encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("<LineID>20260813_0822_41216_003_082221,20260813_0822_41216_004_082750</LineID>", content)
+        self.assertIn("<LineID>20260813_0822_41216_082221,20260813_0822_41216_082750</LineID>", content)
         self.assertIn("<CoordinateReferenceSystem>(EPSG:2056) CH1903+ / LV95_LHN95</CoordinateReferenceSystem>", content)
         self.assertIn("<NoData>0 0 0 0</NoData>", content)
         self.assertEqual(first, "2026-08-13T08:22:21.00")
@@ -1507,11 +1533,12 @@ class TestDmcMetaGuiRegeln(_GuiAppTestCase):
         with unittest.mock.patch.object(self.gui.messagebox, "showwarning") as warn:
             self.assertTrue(self.app.lineid_w._add_one(_DMC_004))
             self.assertTrue(self.app.lineid_w._add_one(_DMC_003))
-            self.assertFalse(self.app.lineid_w._add_one("20260813_004_082750_014_41216"))
+            self.assertFalse(self.app.lineid_w._add_one(_DMC_004))          # Duplikat
+            self.assertFalse(self.app.lineid_w._add_one("20260813_0915_41216_091530"))  # andere Area
             self.assertEqual(self.app.lineid_w.get_ids(), [_DMC_003, _DMC_004])
             self.app.camera_var.set(ADS)
             self.assertEqual(self.app.lineid_w.get_ids(), [])
-            self.assertEqual(warn.call_count, 2)  # Duplikat + entfernte IDs
+            self.assertEqual(warn.call_count, 3)  # Duplikat + andere Area + entfernte IDs
 
 
 if __name__ == "__main__":

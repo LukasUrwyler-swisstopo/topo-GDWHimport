@@ -105,14 +105,43 @@ Ist im GUI `CameraSystem` = `Leica DMC-4` gewählt, gilt:
 
 | | Format | Beispiel |
 |---|---|---|
-| Eingabe im GUI | `YYYYMMDD_LLL_HHMMSS_BBB_QQQQQ` (Datum, Linie, Linienstart UTC, Bildnummer, Kamera-Seriennummer) | `20260813_004_082750_012_41216` |
-| im XML (`LineID`) | `YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS` | `20260813_0822_41216_004_082750` |
+| Eingabe im GUI | `YYYYMMDD_GGGG_QQQQQ_HHMMSS` (Datum, Gruppennummer, Kamera-Seriennummer, Linienstart UTC) | `20260813_0822_41216_082221` |
+| im XML (`LineID`) | **identisch zur Eingabe** | `20260813_0822_41216_082221` |
 
-- `GGGG` ist die **Gruppennummer** = HHMM der ersten beflogenen Linie der Eingabe. Sie kennzeichnet die Linien, die zusammen die AREA bilden, und ist damit auch die `BandID`.
-- Die Bildnummer fällt weg: weitere Bilder derselben Linie gelten als Duplikat.
-- Sortiert wird nach Datum + Linienstart, **nicht** nach Liniennummer.
+- Die LineIDs gehen **unverändert** ins XML – es wird nur chronologisch sortiert und dedupliziert.
+- `GGGG` ist die **Gruppennummer** = HHMM der ersten beflogenen Linie. Sie kennzeichnet die Linien, die zusammen die AREA bilden.
+- `BandID` ist **nicht** die Gruppennummer, sondern `HHMM` des **Linienstarts** (letzter Block) der ersten aufgelisteten LineID – passt damit immer zu `FirstAcquisitionTime`. Beispiel: `20260813_0822_41216_084617` als erste Linie → `BandID` = `0846`. Bei ADS bleibt es das Zeitfeld `[9:13]`.
+- Die Gruppennummer wird **eingegeben, nicht berechnet**: Alle LineIDs einer Area müssen in Datum, Gruppennummer und Seriennummer übereinstimmen, sonst weist die GUI sie ab.
+- Sortiert wird nach Datum + Linienstart (letztes Feld `HHMMSS`).
 - `FirstAcquisitionTime`, `AcquisitionTimes` und `StacItemIdDatetime` sind sekundengenau, Hundertstel immer `00` (z.B. `2026-08-13T08:22:21.00` bzw. `2026-08-13t08222100`). Der STAC-Link im Sicherheitscheck und im Archiv-Log nutzt dieselbe Regel.
 - Beim Wechsel ADS ↔ DMC-4 werden nicht passende LineIDs aus der Liste entfernt (mit Hinweis).
+
+#### Daraus abgeleitete XML-Elemente
+
+Die **erste** (chronologisch früheste) LineID steuert vier der fünf Werte – die Eingabereihenfolge im GUI spielt keine Rolle:
+
+| Element | Quelle |
+|---|---|
+| `LineID` | alle IDs, sortiert, kommagetrennt – 1:1 wie eingegeben |
+| `AcquisitionTimes` | Linienstart **jeder** Linie |
+| `FirstAcquisitionTime` | Linienstart der **ersten** Linie |
+| `StacItemIdDatetime` | dieselbe Zeit, Schreibweise `YYYY-MM-DDtHHMMSSss` |
+| `BandID` | `HHMM` derselben ersten Linie |
+| `Year` | erste 4 Ziffern – **nur bei `.laz`** (`SB_DSM_PUNKTWOLKE`) |
+
+Die Gruppennummer hat **kein eigenes Element**; sie steht nur als Teil des LineID-Strings im XML.
+
+Beispiel – Eingabe `20260813_0822_41216_085104` und `20260813_0822_41216_084617` (SB_DOP, DMC-4):
+
+```xml
+<LineID>20260813_0822_41216_084617,20260813_0822_41216_085104</LineID>
+<AcquisitionTimes>2026-08-13T08:46:17.00,2026-08-13T08:51:04.00</AcquisitionTimes>
+<FirstAcquisitionTime>2026-08-13T08:46:17.00</FirstAcquisitionTime>
+<StacItemIdDatetime>2026-08-13t08461700</StacItemIdDatetime>
+<BandID>0846</BandID>
+```
+
+Hier weicht `BandID` (`0846`) bewusst von der Gruppennummer (`0822`) ab, weil nur eine Teilmenge der Linien importiert wird.
 
 Die Logik liegt an einer Stelle in [`processingScripts/_line_ids.py`](processingScripts/_line_ids.py) und wird von GUI und Script 1 gemeinsam genutzt.
 
@@ -210,7 +239,7 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 | `processingScripts/2_2_SB_DOP_16_GDS_upload_GDWH_withCHECKxml.py` | Sub-Script für `SB_DOP_16` | (direkt möglich, Working Part anpassen) |
 | `processingScripts/3_fix_false_nodata_dop.py` | Optionale NoData-Vorkorrektur (SB_DOP), läuft in-place vor Script 1 | ✓ (eigenständiges CLI, siehe Docstring) |
 | `processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py` | LAS-1.4-Vorkonversion (SB_DSM_PUNKTWOLKE), läuft immer automatisch vor Script 1, schreibt auf Arbeitskopie; Ziel PF6, bei DMC-4 PF7 mit Pflicht-RGB (CLI: `--keep-rgb`) | ✓ (eigenständiges CLI, siehe Docstring) |
-| `processingScripts/_line_ids.py` | LineID-Formate je CameraSystem (Prüfung, Sortierung, XML-Umbau, STAC-Datum), von GUI und Script 1 genutzt | – |
+| `processingScripts/_line_ids.py` | LineID-Formate je CameraSystem (Prüfung, Sortierung, BandID, STAC-Datum), von GUI und Script 1 genutzt | – |
 | `processingScripts/_osgeo_runner.py` | Interner Subprocess-Runner (OSGeo4W Python) | – |
 | `processingScripts/_tif_preview_reader.py` | Interner Subprocess-Helper: erzeugt die TIF-Vorschau im GUI | – |
 | `test/test_functions.py` | Unit-Tests für die Sub-Scripts in `processingScripts/` | ✓ |

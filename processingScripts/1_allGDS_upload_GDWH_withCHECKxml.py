@@ -1,4 +1,4 @@
-print("\nVersion 2.7.0 (Leica DMC-4: LineIDs fuers XML umgebaut (Gruppennummer, siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade und SB_DOP mit DMC-4 EPSG:2056 | "
+print("\nVersion 2.7.2 (Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade und SB_DOP mit DMC-4 EPSG:2056 | "
       "2.6.1: SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
 
 import os
@@ -193,9 +193,13 @@ def line_id_xml_fields(meta_info):
     FirstAcquisitionTime, StacItemIdDatetime, BandID, Year (nur LAZ).
 
     ADS: LineIDs unveraendert in Eingabe-Reihenfolge (die GUI sortiert bereits).
-    Leica DMC-4: Umbau, Sortierung und Gruppennummer siehe _line_ids.py - die
-    Zeiten kommen aus dem Linienstart der Eingabe (Sekunden, Hundertstel 00).
-    BandID ([9:13] der ersten XML-LineID) ist bei DMC damit die Gruppennummer.
+    Leica DMC-4: LineIDs unveraendert, nur chronologisch sortiert und ohne
+    Duplikate (siehe _line_ids.py). Die Zeiten kommen aus dem Linienstart
+    (letztes Feld HHMMSS, Sekunden, Hundertstel 00).
+
+    BandID ist bei beiden Kamerasystemen das HHMM des Aufnahmezeitpunkts der
+    ersten aufgelisteten Linie (siehe _line_ids.band_id) - bei DMC also der
+    Linienstart, NICHT die Gruppennummer.
     """
     line_ids = meta_info.get("Line_ID", [])
     if not line_ids:
@@ -212,7 +216,7 @@ def line_id_xml_fields(meta_info):
         "AcquisitionTimes":     ",".join(format_iso8601_hundredths(t) for t in times),
         "FirstAcquisitionTime": format_iso8601_hundredths(times[0]),
         "StacItemIdDatetime":   format_stac_datetime(times[0]),
-        "BandID":               first[9:13] if len(first) >= 13 else "",
+        "BandID":               _line_ids.band_id(first, camera),
         "Year":                 first[0:4],
     }
 
@@ -805,7 +809,7 @@ def preview_xml_attributes(src, GDS, meta_info):
 
     # Wirft bei ungueltigen LineIDs (z.B. DMC-Format bei ADS) - Abbruch vor der Verarbeitung
     fields = line_id_xml_fields(meta_info)
-    print(f"LineID (XML): {fields['LineID']}")
+    print(f"LineID: {fields['LineID']}")
     print(f"FirstAcquisitionTime: {fields['FirstAcquisitionTime']}")
     print(f"StacItemIdDatetime: {fields['StacItemIdDatetime']}")
 
@@ -1280,9 +1284,9 @@ if __name__ == "__main__":
             # (!)Alle LineIDs(!) des Mosaiks angeben!
             # ADS: erste LineID (!)muss(!) die erste BefliegungsLinie (AufnahmeZeitpunkt) des AOIs sein!
             #(z.B.: "20200821_0952_12504", "20200821_1009_12504", "20200821_1026_12504")
-            # Leica DMC-4: Format YYYYMMDD_LLL_HHMMSS_BBB_QQQQQ, Reihenfolge egal
-            # (wird sortiert und fuers XML umgebaut, siehe _line_ids.py)
-            #(z.B.: "20260813_003_082221_001_41216", "20260813_004_082750_012_41216")
+            # Leica DMC-4: Format YYYYMMDD_GGGG_QQQQQ_HHMMSS, Reihenfolge egal
+            # (wird nur sortiert, geht unveraendert ins XML, siehe _line_ids.py)
+            #(z.B.: "20260813_0822_41216_082221", "20260813_0822_41216_082750")
         "NoData": "0 0 0",
             # kontrollieren! Typische Werte:
             # "0 0 0"    /   "255 255 255"   (8BIT, 3-Band RGB TIF)
