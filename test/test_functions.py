@@ -654,6 +654,32 @@ class TestCopytreeMerge(unittest.TestCase):
 
 
 # ============================================================
+#  _copy_files_flat  (aus _osgeo_runner.py)
+#  Staging der Quelle: nur Dateien der obersten Ebene, Unterordner
+#  (z.B. cog_QC\ beim SB_DOP) werden nicht mitkopiert.
+# ============================================================
+class TestCopyFilesFlat(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.src = os.path.join(self.tmpdir, "src")
+        self.dst = os.path.join(self.tmpdir, "dst")
+        os.makedirs(os.path.join(self.src, "cog_QC"))
+        for rel in ("tile1.tif", "tile1.tfw", os.path.join("cog_QC", "tile1_cog.tif")):
+            with open(os.path.join(self.src, rel), "w", encoding="utf-8") as f:
+                f.write(rel)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_nur_dateien_der_obersten_ebene(self):
+        n_kopiert, uebersprungen = osgeo_runner._copy_files_flat(self.src, self.dst)
+        self.assertEqual(n_kopiert, 2)
+        self.assertEqual(uebersprungen, ["cog_QC"])
+        self.assertEqual(sorted(os.listdir(self.dst)), ["tile1.tfw", "tile1.tif"])
+
+
+# ============================================================
 #  _write_band_chunked  (aus Script 3)
 #  Reine Verifikation, dass zeilenweises Schreiben in Bloecken exakt dem
 #  Original-Array entspricht - unabhaengig von scipy, deshalb hier statt in

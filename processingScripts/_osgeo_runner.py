@@ -151,7 +151,9 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
 def _stage_locally(quelle, ziel, staging_root):
     """
     Spiegelt Quelle und ein bereits bestehendes Ziel-Datenpaket (falls
-    vorhanden) in einen neuen Job-Unterordner von staging_root.
+    vorhanden) in einen neuen Job-Unterordner von staging_root. Von der
+    Quelle werden nur die Dateien der obersten Ebene kopiert (siehe
+    _copy_files_flat), das Ziel dagegen vollstaendig inkl. Unterordnern.
 
     Das bestehende Ziel wird mitgespiegelt (nicht nur ein leerer Ordner
     angelegt), weil files.csv im Zielordner ueber mehrere separate Laeufe
@@ -181,7 +183,11 @@ def _stage_locally(quelle, ziel, staging_root):
     local_ziel = os.path.join(job_dir, "ziel")
 
     print(f"[STAGING] Spiegle Quelle nach {local_quelle} ...", flush=True)
-    shutil.copytree(quelle, local_quelle)
+    n_kopiert, uebersprungen = _copy_files_flat(quelle, local_quelle)
+    print(f"[STAGING] {n_kopiert} Datei(en) aus der Quelle kopiert.", flush=True)
+    if uebersprungen:
+        print(f"[STAGING] Unterordner der Quelle NICHT kopiert (werden nicht verarbeitet): "
+              f"{', '.join(uebersprungen)}", flush=True)
 
     if os.path.isdir(ziel):
         print(f"[STAGING] Spiegle bestehendes Ziel-Datenpaket nach {local_ziel} ...", flush=True)
@@ -191,6 +197,29 @@ def _stage_locally(quelle, ziel, staging_root):
 
     print("[STAGING] Lokale Kopie bereit, Verarbeitung startet lokal.\n", flush=True)
     return local_quelle, local_ziel, job_dir
+
+
+def _copy_files_flat(src, dst):
+    """
+    Kopiert nur die Dateien direkt in src nach dst, ohne Unterordner (z.B.
+    cog_QC\\ beim SB_DOP). Alle Scripts lesen ausschliesslich die oberste
+    Ebene des Quellordners (os.listdir, Script 4 mit recursive=False) -
+    Unterordner mitzukopieren kostet nur Zeit und Platz auf dem Staging-
+    Laufwerk.
+
+    Gibt (Anzahl kopierter Dateien, Liste uebersprungener Unterordner) zurueck.
+    """
+    os.makedirs(dst, exist_ok=True)
+    n_kopiert = 0
+    uebersprungen = []
+    for entry in sorted(os.listdir(src)):
+        src_path = os.path.join(src, entry)
+        if os.path.isdir(src_path):
+            uebersprungen.append(entry)
+            continue
+        shutil.copy2(src_path, os.path.join(dst, entry))
+        n_kopiert += 1
+    return n_kopiert, uebersprungen
 
 
 def _copytree_merge(src, dst):
