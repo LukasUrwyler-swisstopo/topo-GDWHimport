@@ -1,5 +1,6 @@
 """
-GUI_importToGDWH-STAC_SpezialBefliegung.py  –  GDWH(Bucket) Import GUI
+GUI_importToGDWH-STAC_SpezialBefliegung.py:
+GDWH(Bucket) Import GUI
 Tkinter-Oberfläche für den GDWH-Import.
 Steuert die Sub-Scripts 1, 2_1 und 2_2 je nach gewähltem GDS.
 """
