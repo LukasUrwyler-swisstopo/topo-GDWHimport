@@ -9,7 +9,7 @@ Ein GUI-Tool, das den kompletten Ablauf von der Datenvorbereitung bis zum STAC-I
 1. **cmd (Terminal) starten**: (Win-Taste + eingabe "cmd")
 2. **Skript starten** im cmd-Terminal: 
 ```
-python pfad/GUI_importToGDWH-STAC_SpezialBefliegung.py
+python pfad/GUI_GDWHimport.py
 ```
 
 <img width="1000" height="1400" alt="image" src="https://github.com/user-attachments/assets/94a84229-81f6-4514-99ee-1ad0c78f4058" />
@@ -233,7 +233,7 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 
 | Script | Rolle | Direkt ausführbar |
 |--------|-------|:-----------------:|
-| `GUI_importToGDWH-STAC_SpezialBefliegung.py` | Hauptscript (GUI) – steuert alle Sub-Scripts | ✓ |
+| `GUI_GDWHimport.py` | Hauptscript (GUI) – steuert alle Sub-Scripts | ✓ |
 | `processingScripts/1_allGDS_upload_GDWH_withCHECKxml.py` | Sub-Script für `SB_DOP`, `SB_DSM`, `SB_DSM_PUNKTWOLKE` | (direkt möglich, Working Part anpassen) |
 | `processingScripts/2_1_SB_DOP_16_FOLDERorganize_by_lineID.py` | Sortiert 16BIT-DOP-Dateien nach LineID | (direkt möglich, Pfad anpassen) |
 | `processingScripts/2_2_SB_DOP_16_GDS_upload_GDWH_withCHECKxml.py` | Sub-Script für `SB_DOP_16` | (direkt möglich, Working Part anpassen) |
@@ -244,7 +244,7 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 | `processingScripts/_tif_preview_reader.py` | Interner Subprocess-Helper: erzeugt die TIF-Vorschau im GUI | – |
 | `test/test_functions.py` | Unit-Tests für die Sub-Scripts in `processingScripts/` | ✓ |
 
-`GUI_importToGDWH-STAC_SpezialBefliegung.py` liegt im Projekt-Hauptverzeichnis, die Sub-Scripts in `processingScripts/` (von der GUI/vom Runner dynamisch geladen bzw. per Subprocess gestartet), die Unit-Tests in `test/` und die Konfiguration in `config/_gdwh_config.json` (wird beim ersten GUI-Start automatisch erstellt).
+`GUI_GDWHimport.py` liegt im Projekt-Hauptverzeichnis, die Sub-Scripts in `processingScripts/` (von der GUI/vom Runner dynamisch geladen bzw. per Subprocess gestartet), die Unit-Tests in `test/` und die Konfiguration in `config/_gdwh_config.json` (wird beim ersten GUI-Start automatisch erstellt).
 
 **Whitelist bei der Quellordner-Bereinigung:**
 

@@ -1265,7 +1265,7 @@ class _GuiAppTestCase(unittest.TestCase):
         except Exception as e:
             raise unittest.SkipTest(f"tkinter nicht verfuegbar: {e}")
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        path = os.path.join(root, "GUI_importToGDWH-STAC_SpezialBefliegung.py")
+        path = os.path.join(root, "GUI_GDWHimport.py")
         spec = importlib.util.spec_from_file_location("gui_import", path)
         cls.gui = importlib.util.module_from_spec(spec)
         try:
