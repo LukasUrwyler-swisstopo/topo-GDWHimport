@@ -79,7 +79,15 @@ def _catalog_link(gds, ziel):
     host = CATALOG_HOST_INT if "BUCKET_INT" in parts else CATALOG_HOST_PROD
     return f"https://{host}/catalog-ng/catalog/{gds}/import"
 
-AUFTRAGSTYPEN  = ["kry", "ram", "bim", "mom", "wam"]
+# Auftragstyp: Code (geht in XML/STAC-Link) -> Anzeigetext im Dropdown
+AUFTRAGSTYPEN = {
+    "kry": "Kryosphäre (GLAMOS)",
+    "ram": "Rapid Mapping",
+    "bim": "Biotop Monitoring",
+    "mom": "Moor Monitoring",
+    "wam": "Wald Monitoring",
+}
+AUFTRAGSTYP_LABELS = [f"{code} - {name}" for code, name in AUFTRAGSTYPEN.items()]
 TERRAIN_MODELS = [
     "Digital Surface Model (DSM photogrammetric autocorrelation)",
     "swissALTI3D", "swissALTI3D/DHM25", "swissSURFACE3D",
@@ -1288,10 +1296,18 @@ class GDWHApp(tk.Tk):
         gds_frame = ttk.LabelFrame(self, text="GDS auswählen", padding=8, style="Section.TLabelframe")
         gds_frame.pack(fill="x", padx=12, pady=(8, 0))
         for col, (gds, desc) in enumerate(GDS_ITEMS):
-            ttk.Radiobutton(gds_frame, text=f"{gds}\n{desc}",
+            ttk.Radiobutton(gds_frame, text=gds,
                              variable=self.gds_var, value=gds,
                              command=self._on_gds_change
-                             ).grid(row=0, column=col, padx=10, pady=4, sticky="nw")
+                             ).grid(row=0, column=col, padx=10, pady=(4, 0), sticky="nw")
+            # Beschreibung als Kommentar (grau, kursiv) unter dem GDS-Namen,
+            # eingerueckt auf Hoehe des Radiobutton-Textes, Klick waehlt das GDS
+            desc_lbl = ttk.Label(gds_frame, text=desc, font=("Segoe UI", 8, "italic"),
+                                 cursor="hand2")
+            desc_lbl.grid(row=1, column=col, padx=(22, 10), pady=(0, 4), sticky="nw")
+            desc_lbl.bind("<Button-1>", lambda _e, g=gds: (self.gds_var.set(g),
+                                                            self._on_gds_change()))
+            self._dim_labels.append(desc_lbl)
 
         # Kamera-Auswahl – direkt nach dem GDS, weil davon abhaengen: GDWH-Catalog
         # (SB_DOP + DMC-4 -> SB_DOP_DMC, siehe _catalog_gds), NoData und "fixing
@@ -1382,20 +1398,20 @@ class GDWHApp(tk.Tk):
 
         # Auftragstyp
         ttk.Label(sec, text="Auftragstyp:", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
-        self.auftragstyp_var = tk.StringVar(value=AUFTRAGSTYPEN[0])
-        ttk.Combobox(sec, textvariable=self.auftragstyp_var, values=AUFTRAGSTYPEN,
-                      state="readonly", width=10
+        self.auftragstyp_var = tk.StringVar(value=AUFTRAGSTYP_LABELS[0])
+        ttk.Combobox(sec, textvariable=self.auftragstyp_var, values=AUFTRAGSTYP_LABELS,
+                      state="readonly", width=28
                       ).grid(row=r, column=1, sticky="w", padx=(8, 0), pady=3)
         r += 1
 
-        # Area – aus erster Datei im Quellordner abgeleitet, editierbar (falls
+        # Area – vom Quellordner abgeleitet, editierbar (falls
         # Dateinamen-Format nicht passt und der Wert falsch abgeleitet wurde).
         ttk.Label(sec, text="Area:", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
         self.area_var = tk.StringVar()
         ttk.Entry(sec, textvariable=self.area_var
                    ).grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=3)
         area_hint = ttk.Label(sec,
-            text="aus erster Datei im Quellordner abgeleitet – bei Bedarf korrigierbar",
+            text="vom Quellordner abgeleitet [editierbar]",
             font=("", 8))
         area_hint.grid(row=r+1, column=1, sticky="w", padx=(8, 0))
         self._dim_labels.append(area_hint)
@@ -1438,7 +1454,9 @@ class GDWHApp(tk.Tk):
         # eigentliche Maskenberechnung (Script 1) startet. Echte grosse
         # NoData-Flächen bleiben unverändert. NoData-Zielwert wird aus der
         # Auswahl oben (self.nodata_var) übernommen.
-        self.fix_nodata_var = tk.BooleanVar(value=False)
+        # Default aktiv (ADS + SB_DOP), bei DMC-4 deaktiviert, siehe _update_camera_nodata_rules
+        self.fix_nodata_var = tk.BooleanVar(value=True)
+        self._fix_nodata_forced_off = False
         self.fix_nodata_cb = ttk.Checkbutton(
             sec, variable=self.fix_nodata_var,
             text="ADS: fixing false NoData pixels in DATA",)
@@ -2013,8 +2031,9 @@ class GDWHApp(tk.Tk):
         """NoData-Regeln, die vom CameraSystem abhaengen:
           - 'fixing false NoData pixels' (nur ADS100-Radiometrie relevant, siehe
             Checkbox-Text): ausgeblendet ausser bei GDS SB_DOP UND CameraSystem
-            != DMC-4. Bei DMC-4 wird die Option zusaetzlich aktiv deaktiviert
-            (nicht nur versteckt), falls sie zuvor angehakt war.
+            != DMC-4, dort standardmaessig aktiv. Bei DMC-4 wird die Option
+            zusaetzlich aktiv deaktiviert (nicht nur versteckt); beim Wechsel
+            zurueck auf ADS wird der Default (aktiv) wiederhergestellt.
           - SB_DOP mit DMC-4: NoData immer '0 0 0 0', Dropdown gesperrt. Die
             DMC-Pipeline (Reality Studio -> DMC-Converter) schreibt NoData immer
             schwarz, falsche NoData-Pixel in den Nutzdaten entstehen dort nicht.
@@ -2025,11 +2044,15 @@ class GDWHApp(tk.Tk):
         gds = self.gds_var.get()
         is_dmc = self.camera_var.get() == DMC_CAMERA
         if gds == "SB_DOP" and not is_dmc:
+            if self._fix_nodata_forced_off:
+                self.fix_nodata_var.set(True)
+                self._fix_nodata_forced_off = False
             self.fix_nodata_cb.grid()
         else:
             self.fix_nodata_cb.grid_remove()
             if is_dmc:
                 self.fix_nodata_var.set(False)
+                self._fix_nodata_forced_off = True
 
         opts, _ = self._nodata_options()
         if gds == "SB_DOP" and is_dmc:
@@ -2355,7 +2378,7 @@ class GDWHApp(tk.Tk):
     def _build_meta_info(self):
         gds  = self.gds_var.get()
         meta = {
-            "Auftragstyp":           self.auftragstyp_var.get(),
+            "Auftragstyp":           self.auftragstyp_var.get().split(" - ", 1)[0],
             "CustomAttribute":       self._custom_attribute(),
             "Line_ID":               ([self.lineid_single_var.get().strip()]
                                       if gds == "SB_DOP_16" else self.lineid_w.get_ids()),
@@ -2491,10 +2514,9 @@ class GDWHApp(tk.Tk):
             # GDWH-BUCKET Path zuruecksetzen: verhindert, dass eine naechste
             # Prozessierung versehentlich ins selbe (alte) Bucket schreibt.
             self.ziel_var.set("")
-            # "ADS: fixing false NoData pixels"-Option zuruecksetzen: verhindert,
-            # dass sie bei einer naechsten Prozessierung faelschlicherweise
-            # noch aktiv ist.
-            self.fix_nodata_var.set(False)
+            # "ADS: fixing false NoData pixels"-Option auf Default zuruecksetzen
+            # (aktiv ausser bei DMC-4), falls sie manuell abgewaehlt wurde.
+            self.fix_nodata_var.set(self.camera_var.get() != DMC_CAMERA)
             self._update_start_btn_state()
             ImportDoneDialog(self, catalog_gds, ordner_name, ziel=ziel, dark=self._dark).wait()
         else:
