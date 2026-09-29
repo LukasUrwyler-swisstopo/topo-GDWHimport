@@ -8,8 +8,9 @@ ADS (ADS100 / ADS80):
     Eingabe = XML   YYYYMMDD_HHMM_QQQQQ               20200821_0952_12504
 
 Leica DMC-4:
-    Eingabe = XML   YYYYMMDD_GGGG_QQQQQ_HHMMSS        20260813_0822_41216_082221
-                    Datum, Gruppennummer, Kamera-Seriennummer, Linienstart (UTC)
+    Eingabe = XML   YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS    20260813_0822_41216_003_082221
+                    Datum, Gruppennummer, Kamera-Seriennummer, Liniennummer,
+                    Linienstart (UTC)
 
     Die LineIDs gehen unveraendert ins XML - nur Sortierung (chronologisch) und
     Duplikat-Entfernung finden statt.
@@ -32,12 +33,12 @@ import re
 DMC_CAMERA = "Leica DMC-4"
 
 ADS_LINE_ID_PAT = re.compile(r'^\d{8}_\d{4}_\d{5}$')
-DMC_LINE_ID_PAT = re.compile(r'^(\d{8})_(\d{4})_(\d{5})_(\d{6})$')
+DMC_LINE_ID_PAT = re.compile(r'^(\d{8})_(\d{4})_(\d{5})_(\d{3})_(\d{6})$')
 
 ADS_FORMAT  = "YYYYMMDD_HHMM_QQQQQ"
-DMC_FORMAT  = "YYYYMMDD_GGGG_QQQQQ_HHMMSS"
+DMC_FORMAT  = "YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS"
 ADS_EXAMPLE = "20200821_0952_12504"
-DMC_EXAMPLE = "20260813_0822_41216_082221"
+DMC_EXAMPLE = "20260813_0822_41216_003_082221"
 
 
 def is_dmc(camera):
@@ -61,8 +62,9 @@ def _parse_dmc(line_id):
     m = DMC_LINE_ID_PAT.match(line_id or "")
     if not m:
         raise ValueError(f"LineID '{line_id}' passt nicht zum DMC-4-Format {DMC_FORMAT}")
-    date, group, serial, hhmmss = m.groups()
-    return {"date": date, "group": group, "serial": serial, "hhmmss": hhmmss}
+    date, group, serial, line_no, hhmmss = m.groups()
+    return {"date": date, "group": group, "serial": serial,
+            "line_no": line_no, "hhmmss": hhmmss}
 
 
 def line_key(line_id, camera):
@@ -81,11 +83,12 @@ def area_key(line_id, camera):
 
 
 def sort_key(line_id, camera):
-    """Chronologisch: Datum, dann Linienstart."""
+    """Chronologisch: Datum, dann Linienstart (bei DMC-4 Liniennummer als
+    Tiebreaker)."""
     if not is_dmc(camera):
         return (line_id[0:8], line_id[9:13], line_id)
     p = _parse_dmc(line_id)
-    return (p["date"], p["hhmmss"])
+    return (p["date"], p["hhmmss"], p["line_no"])
 
 
 def normalize(line_ids, camera):

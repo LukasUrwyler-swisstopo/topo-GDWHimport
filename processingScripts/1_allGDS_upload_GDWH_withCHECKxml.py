@@ -1,4 +1,4 @@
-print("\nVersion 2.7.2 (Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade, SB_DOP und SB_DOP_16 EPSG:2056 (DOP: Warnung bei Hoehenbezug ungleich LN02) | "
+print("\nVersion 2.7.3 (Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade, SB_DOP und SB_DOP_16 EPSG:2056 (DOP: Warnung bei Hoehenbezug ungleich LN02) | "
       "2.6.1: SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
 
 import os
@@ -1135,9 +1135,9 @@ if __name__ == "__main__":
             # (!)Alle LineIDs(!) des Mosaiks angeben!
             # ADS: erste LineID (!)muss(!) die erste BefliegungsLinie (AufnahmeZeitpunkt) des AOIs sein!
             #(z.B.: "20200821_0952_12504", "20200821_1009_12504", "20200821_1026_12504")
-            # Leica DMC-4: Format YYYYMMDD_GGGG_QQQQQ_HHMMSS, Reihenfolge egal
+            # Leica DMC-4: Format YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS, Reihenfolge egal
             # (wird nur sortiert, geht unveraendert ins XML, siehe _line_ids.py)
-            #(z.B.: "20260813_0822_41216_082221", "20260813_0822_41216_082750")
+            #(z.B.: "20260813_0822_41216_003_082221", "20260813_0822_41216_004_082750")
         "NoData": "0 0 0",
             # kontrollieren! Typische Werte:
             # "0 0 0"    /   "255 255 255"   (8BIT, 3-Band RGB TIF)

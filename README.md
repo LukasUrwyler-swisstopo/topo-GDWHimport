@@ -108,14 +108,14 @@ Ist im GUI unter „Kamera-Auswahl“ `CameraSystem` = `Leica DMC-4` gewählt, g
 
 | | Format | Beispiel |
 |---|---|---|
-| Eingabe im GUI | `YYYYMMDD_GGGG_QQQQQ_HHMMSS` (Datum, Gruppennummer, Kamera-Seriennummer, Linienstart UTC) | `20260813_0822_41216_082221` |
-| im XML (`LineID`) | **identisch zur Eingabe** | `20260813_0822_41216_082221` |
+| Eingabe im GUI | `YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS` (Datum, Gruppennummer, Kamera-Seriennummer, Liniennummer, Linienstart UTC) | `20260813_0822_41216_003_082221` |
+| im XML (`LineID`) | **identisch zur Eingabe** | `20260813_0822_41216_003_082221` |
 
 - Die LineIDs gehen **unverändert** ins XML – es wird nur chronologisch sortiert und dedupliziert.
 - `GGGG` ist die **Gruppennummer** = HHMM der ersten beflogenen Linie. Sie kennzeichnet die Linien, die zusammen die AREA bilden.
-- `BandID` ist **nicht** die Gruppennummer, sondern `HHMM` des **Linienstarts** (letzter Block) der ersten aufgelisteten LineID – passt damit immer zu `FirstAcquisitionTime`. Beispiel: `20260813_0822_41216_084617` als erste Linie → `BandID` = `0846`. Bei ADS bleibt es das Zeitfeld `[9:13]`.
+- `BandID` ist **nicht** die Gruppennummer, sondern `HHMM` des **Linienstarts** (letzter Block) der ersten aufgelisteten LineID – passt damit immer zu `FirstAcquisitionTime`. Beispiel: `20260813_0822_41216_008_084617` als erste Linie → `BandID` = `0846`. Bei ADS bleibt es das Zeitfeld `[9:13]`.
 - Die Gruppennummer wird **eingegeben, nicht berechnet**: Alle LineIDs einer Area müssen in Datum, Gruppennummer und Seriennummer übereinstimmen, sonst weist die GUI sie ab.
-- Sortiert wird nach Datum + Linienstart (letztes Feld `HHMMSS`).
+- Sortiert wird nach Datum + Linienstart (letztes Feld `HHMMSS`), bei gleichem Linienstart nach Liniennummer `LLL`.
 - `FirstAcquisitionTime`, `AcquisitionTimes` und `StacItemIdDatetime` sind sekundengenau, Hundertstel immer `00` (z.B. `2026-08-13T08:22:21.00` bzw. `2026-08-13t08222100`). Der STAC-Link im Sicherheitscheck und im Archiv-Log nutzt dieselbe Regel.
 - Beim Wechsel ADS ↔ DMC-4 werden nicht passende LineIDs aus der Liste entfernt (mit Hinweis).
 
@@ -134,10 +134,10 @@ Die **erste** (chronologisch früheste) LineID steuert vier der fünf Werte – 
 
 Die Gruppennummer hat **kein eigenes Element**; sie steht nur als Teil des LineID-Strings im XML.
 
-Beispiel – Eingabe `20260813_0822_41216_085104` und `20260813_0822_41216_084617` (SB_DOP, DMC-4):
+Beispiel – Eingabe `20260813_0822_41216_009_085104` und `20260813_0822_41216_008_084617` (SB_DOP, DMC-4):
 
 ```xml
-<LineID>20260813_0822_41216_084617,20260813_0822_41216_085104</LineID>
+<LineID>20260813_0822_41216_008_084617,20260813_0822_41216_009_085104</LineID>
 <AcquisitionTimes>2026-08-13T08:46:17.00,2026-08-13T08:51:04.00</AcquisitionTimes>
 <FirstAcquisitionTime>2026-08-13T08:46:17.00</FirstAcquisitionTime>
 <StacItemIdDatetime>2026-08-13t08461700</StacItemIdDatetime>

@@ -349,7 +349,7 @@ class LineIDWidget(ttk.LabelFrame):
         ef = ttk.Frame(self)
         ef.pack(fill="x")
         self.var = tk.StringVar()
-        self._entry = ttk.Entry(ef, textvariable=self.var, width=28)
+        self._entry = ttk.Entry(ef, textvariable=self.var, width=32)
         self._entry.pack(side="left", fill="x", expand=True)
         self._entry.bind("<Return>",     lambda _: self._add())
         self._entry.bind("<Control-v>",  self._on_paste)
