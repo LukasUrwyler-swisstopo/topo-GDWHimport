@@ -1152,10 +1152,9 @@ if __name__ == "__main__":
             # "swissALTI3D"
             # "swissALTI3D/DHM25"
             # "swissSURFACE3D"
-        "SourceReferenceSystem": "(EPSG:2056) CH1903+ / (EPSG:5728) LN02",
+        "SourceReferenceSystem": "(EPSG:2056) CH1903+ / LV95_LN02",
             # INPUT kontrollieren! only possible Value:
-            # "(EPSG:2056) CH1903+ / (EPSG:5728) LN02"
-            # Ausnahme SB_DOP / SB_DOP_16 (alle CameraSysteme): "(EPSG:2056) CH1903+"
+            # "(EPSG:2056) CH1903+ / LV95_LN02"   (alle GDS und CameraSysteme)
         "CameraSystem": "Leica ADS100",
             # kontrollieren;
             # "Leica ADS100"

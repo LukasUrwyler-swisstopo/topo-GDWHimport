@@ -10,7 +10,8 @@ Soll-CRS im GeoTIFF-Tag:
   SB_DSM Hillshade: nur EPSG:2056 - reine Darstellung, keine Hoehenwerte (mit
     Hoehenbezug meldet GDAL sonst faelschlich 'Unit Type: metre').
   SB_DOP / SB_DOP_16 (alle CameraSysteme): nur EPSG:2056 - DOP ohne Hoehenwerte,
-    kein Hoehenbezug (im XML '(EPSG:2056) CH1903+').
+    kein Hoehenbezug im TIFF (das XML-Feld CoordinateReferenceSystem ist davon
+    unabhaengig, siehe SOURCE_REF_SYS im GUI).
   SB_DSM_PUNKTWOLKE: keine Pruefung hier (LAZ, CRS setzt die LAS-1.4-Vorkonversion).
 
 DOP mit Hoehenbezug im Tag:

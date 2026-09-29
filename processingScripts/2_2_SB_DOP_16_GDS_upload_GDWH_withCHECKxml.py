@@ -665,8 +665,8 @@ if __name__ == "__main__":
             # "0 0 0 0" (schwarze Background-Pixel) / "65535 65535 65535 65535" (weisse Background-Pixel)!
         "CustomAttribute": "Digital OrthoPhoto - (ADS Line) NRGB 16BIT",
             # kontrollieren; "Digital OrthoPhoto - (ADS Line) NRGB 16BIT"
-        "SourceReferenceSystem": "(EPSG:2056) CH1903+",
-            # kontrollieren! only possible Value "(EPSG:2056) CH1903+" (DOP ohne Hoehenbezug)
+        "SourceReferenceSystem": "(EPSG:2056) CH1903+ / LV95_LN02",
+            # kontrollieren! only possible Value "(EPSG:2056) CH1903+ / LV95_LN02"
         "CameraSystem": "Leica ADS100",
             # kontrollieren;
             # "Leica ADS100"

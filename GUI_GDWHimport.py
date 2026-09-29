@@ -57,7 +57,7 @@ GDS_CUSTOM_ATTR_DMC = {
 CATALOG_HOST_PROD = "ltgdwh.adr.admin.ch"
 CATALOG_HOST_INT  = "ltgdwhi.adr.admin.ch"
 CATALOG_GDS_TYPES = ("SB_DOP", "SB_DOP_16", "SB_DSM", "SB_DSM_PUNKTWOLKE", "SB_DOP_DMC")
-# DOP-GDS: SourceRefSys ohne Hoehenbezug, CRS-Vorpruefung der TIFF vor dem Start
+# DOP-GDS: TIFF-CRS ohne Hoehenbezug, CRS-Vorpruefung der TIFF vor dem Start
 DOP_GDS = ("SB_DOP", "SB_DOP_16")
 # Eigener GDWH-Catalog fuer Leica DMC-4 (nur SB_DOP), alle anderen GDS wie bei ADS
 CATALOG_GDS_DMC = {"SB_DOP": "SB_DOP_DMC"}
@@ -87,15 +87,15 @@ TERRAIN_MODELS = [
 CAMERA_SYSTEMS = ["Leica ADS100", "Leica ADS80", "Leica DMC-4"]
 # DMC-4: SB_DOP-NoData fix '0 0 0 0' ohne Vorkorrektur (siehe _update_camera_nodata_rules),
 # Punktwolken immer PF7 mit RGB (siehe Script 4 / _osgeo_runner.RGB_CAMERA_SYSTEMS),
-# TerrainModel/SourceRefSys/CustomAttribute/SB_DOP_16 siehe _update_camera_meta_rules
+# TerrainModel/CustomAttribute/SB_DOP_16 siehe _update_camera_meta_rules
 DMC_CAMERA        = _line_ids.DMC_CAMERA
 DMC_TERRAIN_MODEL = TERRAIN_MODELS[0]
-SOURCE_REF_SYS = "(EPSG:2056) CH1903+ / (EPSG:5728) LN02"
-# SB_DOP und SB_DOP_16 (alle CameraSysteme): ein DOP ist ein 2D-Produkt ohne Hoehenwerte - nur
-# Lagebezug, kein Hoehenbezug (der Hoehenbezug der Orthorektifizierung gehoert nicht in
-# die Metadaten des Produkts). Bei DMC-4 im TIFF ebenfalls nur EPSG:2056 (siehe
-# tiff_crs_target in Script 1).
-SOURCE_REF_SYS_DOP = "(EPSG:2056) CH1903+"
+# SourceReferenceSystem = XML-Feld <CoordinateReferenceSystem>. Nur Werte aus dem
+# GDWH-Wertebereich verwenden, sonst lehnt der GDWH-Check das XML ab (z.B.
+# '(EPSG:2056) CH1903+' oder '... / (EPSG:5728) LN02' sind NICHT zulaessig).
+# Einheitlich fuer alle GDS und CameraSysteme, auch DOP (dort im TIFF selbst nur
+# EPSG:2056, siehe tiff_crs_target in _tiff_crs.py).
+SOURCE_REF_SYS = "(EPSG:2056) CH1903+ / LV95_LN02"
 NODATA_DOP_OPT = ["0 0 0   (schwarz, 8BIT RGB)",     "255 255 255   (weiss, 8BIT RGB)"]
 NODATA_DOP_VAL = ["0 0 0",                            "255 255 255"]
 NODATA_D16_OPT = ["0 0 0 0   (schwarz, 16BIT NRGB)", "65535 65535 65535 65535   (weiss, 16BIT NRGB)"]
@@ -1295,8 +1295,8 @@ class GDWHApp(tk.Tk):
 
         # Kamera-Auswahl – direkt nach dem GDS, weil davon abhaengen: GDWH-Catalog
         # (SB_DOP + DMC-4 -> SB_DOP_DMC, siehe _catalog_gds), NoData und "fixing
-        # false NoData pixels" (SB_DOP), TerrainModel, SourceRefSys, CustomAttribute
-        # und das LineID-Format. Ausserhalb von 'Pfade'/'Meta-Informationen', damit
+        # false NoData pixels" (SB_DOP), TerrainModel, CustomAttribute und das
+        # LineID-Format. Ausserhalb von 'Pfade'/'Meta-Informationen', damit
         # es von der Sperre SB_DOP_16 + DMC-4 (_set_form_locked) nie erfasst wird.
         cam_frame = ttk.LabelFrame(self, text="Kamera-Auswahl", padding=8, style="Section.TLabelframe")
         cam_frame.pack(fill="x", padx=12, pady=(8, 0))
@@ -1463,14 +1463,12 @@ class GDWHApp(tk.Tk):
         # jetzt immer automatisch vor Script 1 (siehe _osgeo_runner.py) und
         # setzt das CRS dabei byte-exakt, kein Checkbox-Entscheid mehr noetig.
 
-        # SourceReferenceSystem (nicht editierbar, abhaengig von GDS/CameraSystem,
-        # siehe _source_ref_sys)
+        # SourceReferenceSystem (nicht editierbar, fix fuer alle GDS/CameraSysteme)
         ttk.Label(sec, text="SourceRefSys:", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
         srs_row = ttk.Frame(sec)
         srs_row.grid(row=r, column=1, sticky="w", padx=(8, 0), pady=3)
         srs_val = ttk.Label(srs_row, text=SOURCE_REF_SYS, font=("", 9, "bold"))
         srs_val.pack(side="left")
-        self._srs_val_lbl = srs_val
         srs_fix = ttk.Label(srs_row, text="  [Standard]", font=("", 8))
         srs_fix.pack(side="left")
         self._accent_labels.append(srs_val)
@@ -1957,13 +1955,6 @@ class GDWHApp(tk.Tk):
             return GDS_CUSTOM_ATTR_DMC[gds]
         return GDS_CUSTOM_ATTR[gds]
 
-    def _source_ref_sys(self):
-        """DOPs (SB_DOP, SB_DOP_16; alle CameraSysteme) nur Lagebezug,
-        SB_DSM/SB_DSM_PUNKTWOLKE LV95_LN02 (Wertebereich GDWH)."""
-        if self.gds_var.get() in DOP_GDS:
-            return SOURCE_REF_SYS_DOP
-        return SOURCE_REF_SYS
-
     def _update_camera_meta_rules(self):
         """Meta-Regeln, die vom CameraSystem abhaengen (NoData siehe
         _update_camera_nodata_rules). Bei Leica DMC-4:
@@ -1982,7 +1973,6 @@ class GDWHApp(tk.Tk):
             self.terrain_cb.config(state="readonly")
             self.terrain_hint.grid_remove()
         self.custom_var.set(self._custom_attribute())
-        self._srs_val_lbl.config(text=self._source_ref_sys())
 
         blocked = self._is_dop16_dmc()
         if blocked:
@@ -2371,7 +2361,7 @@ class GDWHApp(tk.Tk):
                                       if gds == "SB_DOP_16" else self.lineid_w.get_ids()),
             "TerrainModel":          (DMC_TERRAIN_MODEL if self.camera_var.get() == DMC_CAMERA
                                       else self.terrain_var.get()),
-            "SourceReferenceSystem": self._source_ref_sys(),
+            "SourceReferenceSystem": SOURCE_REF_SYS,
             "CameraSystem":          self.camera_var.get(),
         }
         if gds == "SB_DOP_16":

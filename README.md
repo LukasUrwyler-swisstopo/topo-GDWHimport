@@ -82,7 +82,7 @@ Der **Import-Button** bleibt gesperrt, bis alle Pflichtfelder ausgefüllt sind.
 | `NoData` | NoData-Quellwert (bestimmt v.a. bei SB_DOP/SB_DOP_16 die Maskenberechnung) |
 | `TerrainModel` | verwendetes Geländemodell (bei DMC-4 fix DSM) |
 | `CameraSystem` | Kamerasystem (Leica ADS100 / ADS80 / DMC-4), gewählt im Kasten „Kamera-Auswahl“ unter der GDS-Auswahl. Bei DMC-4 gelten Sonderregeln, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln) |
-| `SourceRefSys` | automatisch je GDS: `SB_DOP` und `SB_DOP_16` `(EPSG:2056) CH1903+` (DOP = 2D-Produkt ohne Höhenwerte, nur Lagebezug), `SB_DSM` und `SB_DSM_PUNKTWOLKE` `(EPSG:2056) CH1903+ / (EPSG:5728) LN02` |
+| `SourceRefSys` | fix `(EPSG:2056) CH1903+ / LV95_LN02` für alle GDS und CameraSysteme (XML-Feld `CoordinateReferenceSystem`, nur Werte aus dem GDWH-Wertebereich) |
 | `CustomAttribute` | Beschreibung des Datenprodukts (automatisch je GDS und CameraSystem) |
 | `Line_ID(s)` | Befliegungslinien – werden automatisch chronologisch sortiert; mehrere Zeilen per Copy/Paste aus Excel möglich. Format je CameraSystem, siehe [LineIDs bei DMC-4](#lineids-bei-dmc-4) |
 
@@ -100,9 +100,10 @@ Ist im GUI unter „Kamera-Auswahl“ `CameraSystem` = `Leica DMC-4` gewählt, g
 | `SB_DOP` | GDWH-Catalog `SB_DOP_DMC` statt `SB_DOP` (Buttons „GDWH-PROD“/„GDWH-INT“ und Link im Abschluss-Dialog); GDWH-BUCKET Path `…\SB_DOP_DMC\2026_AREA_DOP`, sonst Zielpfad-Warnung | Eigener Catalog im GDWH für DMC-DOPs. |
 | `SB_DOP` | NoData immer `0 0 0 0` (vier Werte, Dropdown gesperrt), Option „fixing false NoData pixels“ ausgeblendet und aus | Die DMC-Pipeline (Reality Studio → `topo-DMCdataConverter`) liefert seit der Umstellung **4-Band RGBN** (8bit), schreibt NoData immer schwarz und erzeugt keine falschen NoData-Pixel in den Nutzdaten. |
 | `SB_DOP` | `CustomAttribute` = `Digital OrthoPhoto - Mosaic RGBN 8BIT` | Die DMC-Pipeline liefert seit der Umstellung 4-Band RGBN. |
+| `SB_DOP` | `SourceRefSys` wie ADS `(EPSG:2056) CH1903+ / LV95_LN02`; CRS-Tag im TIFF = `EPSG:2056` (ohne Höhenbezug) | Einheitlicher Wert mit ADS-DOP und den übrigen GDS (GDWH-Wertebereich). |
 | `SB_DOP_16` | gibt es nicht – Formular gesperrt, **IMPORT STARTEN** rot und deaktiviert (GDS und CameraSystem bleiben wählbar) | DMC liefert keine ADS-Einzellinien. |
-| `SB_DSM` | wie ADS, `SourceRefSys` bleibt `(EPSG:2056) CH1903+ / (EPSG:5728) LN02` | |
-| `SB_DSM_PUNKTWOLKE` | immer **PF7** (PF6 + RGB), Kachel ohne RGB-Werte = **Abbruch**; `CustomAttribute` = `Digital Surface Model - PointCloud LAZ RGB (DSM photogrammetric autocorrelation)`; `SourceRefSys` bleibt `(EPSG:2056) CH1903+ / (EPSG:5728) LN02` | Die Farbe der DMC-Punktwolke soll bis ins GDWH-Produkt erhalten bleiben, das XML nennt RGB. |
+| `SB_DSM` | wie ADS, `SourceRefSys` bleibt `LV95_LN02` | |
+| `SB_DSM_PUNKTWOLKE` | immer **PF7** (PF6 + RGB), Kachel ohne RGB-Werte = **Abbruch**; `CustomAttribute` = `Digital Surface Model - PointCloud LAZ RGB (DSM photogrammetric autocorrelation)`; `SourceRefSys` bleibt `LV95_LN02` | Die Farbe der DMC-Punktwolke soll bis ins GDWH-Produkt erhalten bleiben, das XML nennt RGB. |
 
 ### LineIDs bei DMC-4
 
