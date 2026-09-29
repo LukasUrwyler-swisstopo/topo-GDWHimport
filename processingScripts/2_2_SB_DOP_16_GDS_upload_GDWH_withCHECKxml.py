@@ -14,6 +14,12 @@ import sys
 
 gdal.UseExceptions()
 
+# CRS-Tag pruefen/setzen: gemeinsames Modul mit Script 1 und der GUI (liegt daneben)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+import _tiff_crs  # noqa: E402
+
 # ****************************** Log-Functions ******************************
 # Hinweis: Dieses Script gibt alles auf die Konsole aus. Beim Start via GUI
 # faengt die GUI diese Ausgabe ab und schreibt sie in ihr eigenes Log
@@ -223,6 +229,7 @@ def preview_xml_attributes(src, meta_info):
     print(meta_info.get("SourceReferenceSystem", ""))
     print(meta_info.get("TerrainModel", ""))
     print(f"NoData: {meta_info.get('NoData', '')}")
+    print(f"TIFF-CRS: wird geprueft und bei Bedarf gesetzt, Soll {_tiff_crs.CRS_LV95}")
 
     all_area_ids = meta_info.get("allAreaLineIDs", [])
     print(",".join(all_area_ids))
@@ -529,6 +536,10 @@ def files_in_order(path, output_path, GDS, meta_info, workers=None):
                        if os.path.isfile(os.path.join(path, fn))
                        and fn.lower().endswith(('.tif', '.tiff', '.las', '.laz')))
 
+    # CRS-Tag pruefen/setzen (Soll EPSG:2056, DOP ohne Hoehenbezug) - bricht ab,
+    # bevor eine Kachel veraendert wird, falls eine dem Soll widerspricht
+    _tiff_crs.ensure_tiff_crs(path, all_files, GDS, meta_info, log=log)
+
     # Raster-Attribute nur einmal aus erster Datei lesen (alle Kacheln gleich gross)
     cached_attrs = None
     first_tif = next((fn for fn in all_files if fn.lower().endswith(('.tif', '.tiff'))), None)
@@ -654,8 +665,8 @@ if __name__ == "__main__":
             # "0 0 0 0" (schwarze Background-Pixel) / "65535 65535 65535 65535" (weisse Background-Pixel)!
         "CustomAttribute": "Digital OrthoPhoto - (ADS Line) NRGB 16BIT",
             # kontrollieren; "Digital OrthoPhoto - (ADS Line) NRGB 16BIT"
-        "SourceReferenceSystem": "(EPSG:2056) CH1903+ / LV95_LN02",
-            # kontrollieren! only possible Value ("EPSG:2056) CH1903+ / LV95_LN02"
+        "SourceReferenceSystem": "(EPSG:2056) CH1903+",
+            # kontrollieren! only possible Value "(EPSG:2056) CH1903+" (DOP ohne Hoehenbezug)
         "CameraSystem": "Leica ADS100",
             # kontrollieren;
             # "Leica ADS100"

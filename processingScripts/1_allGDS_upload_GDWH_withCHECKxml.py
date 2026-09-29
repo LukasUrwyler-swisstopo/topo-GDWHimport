@@ -1,4 +1,4 @@
-print("\nVersion 2.7.2 (Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade und SB_DOP mit DMC-4 EPSG:2056 | "
+print("\nVersion 2.7.2 (Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade, SB_DOP und SB_DOP_16 EPSG:2056 (DOP: Warnung bei Hoehenbezug ungleich LN02) | "
       "2.6.1: SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
 
 import os
@@ -574,165 +574,16 @@ def tag_mask_on_raster(file_path, nodata_str, rewrite_real_nodata_to_zero=False)
 
 
 # ****************************** Koordinatensystem (TIFF) ******************************
-# Soll-CRS im GeoTIFF-Tag:
-#   SB_DSM DSM: EPSG:2056+5728 - Hoehen in LN02. GDAL schreibt Compound-CRS als
-#     GeoTIFF 1.1 mit VerticalGeoKey (OGC 19-008r4).
-#   SB_DSM Hillshade: nur EPSG:2056 - reine Darstellung, keine Hoehenwerte (mit
-#     Hoehenbezug meldet GDAL sonst faelschlich 'Unit Type: metre').
-#   SB_DOP mit Leica DMC-4: nur EPSG:2056 - der Hoehenbezug der Orthorektifizierung
-#     (LHN95) gehoert nicht ins TIFF, im XML steht er nur als Text
-#     ('(EPSG:2056) CH1903+ / LV95_LHN95', analog LV95_LN02 der anderen GDS).
-# Alle anderen Faelle: keine Pruefung, Verhalten wie bisher.
-CRS_LV95      = "EPSG:2056"
-CRS_LV95_LN02 = "EPSG:2056+5728"
-
-# Grobe LV95-Ausdehnung (CH/FL, grosszuegig gepuffert) - nur fuer Kacheln OHNE
-# CRS-Tag: LV03-Koordinaten (6-stellig) fallen klar heraus.
-LV95_E_RANGE = (2_400_000, 2_900_000)
-LV95_N_RANGE = (1_000_000, 1_350_000)
-
-
-def tiff_crs_target(GDS, meta_info, filename=""):
-    """Soll-CRS im TIFF-Tag der Datei filename oder None (keine Pruefung)."""
-    if GDS == "SB_DSM":
-        # Hillshade-Erkennung wie get_nodata_value
-        return CRS_LV95 if "_hillshade_" in filename.lower() else CRS_LV95_LN02
-    if GDS == "SB_DOP" and _line_ids.is_dmc(meta_info.get("CameraSystem")):
-        return CRS_LV95
-    return None
-
-
-def _in_lv95_extent(gt, cols, rows):
-    corners = ((0, 0), (cols, 0), (0, rows), (cols, rows))
-    xs = [gt[0] + c * gt[1] + r * gt[2] for c, r in corners]
-    ys = [gt[3] + c * gt[4] + r * gt[5] for c, r in corners]
-    return (LV95_E_RANGE[0] <= min(xs) and max(xs) <= LV95_E_RANGE[1]
-            and LV95_N_RANGE[0] <= min(ys) and max(ys) <= LV95_N_RANGE[1])
-
-
-def read_crs_info(file_path):
-    """Liest das CRS eines TIFF (read-only) als Dict fuer decide_crs_action."""
-    ds = gdal.Open(file_path, gdal.GA_ReadOnly)
-    if ds is None:
-        raise FileNotFoundError(f"Konnte Raster nicht öffnen: {file_path}")
-    try:
-        srs = ds.GetSpatialRef()
-        in_extent = _in_lv95_extent(ds.GetGeoTransform(), ds.RasterXSize, ds.RasterYSize)
-    finally:
-        ds = None
-
-    info = {"has_crs": srs is not None, "in_lv95_extent": in_extent, "name": "",
-            "is_compound": False, "horizontal_is_lv95": False, "vertical_epsg": None}
-    if srs is None:
-        return info
-
-    lv95 = osr.SpatialReference()
-    lv95.ImportFromEPSG(2056)
-    info["name"] = srs.GetName() or ""
-    info["is_compound"] = bool(srs.IsCompound())
-    if not info["is_compound"]:
-        # IsSame statt EPSG-Code: auch ein gleichwertiges ESRI-WKT ohne ID gilt als LV95
-        info["horizontal_is_lv95"] = bool(srs.IsSame(lv95))
-        return info
-    if hasattr(srs, "StripVertical"):
-        horizontal = srs.Clone()
-        horizontal.StripVertical()
-        info["horizontal_is_lv95"] = bool(horizontal.IsSame(lv95))
-    else:
-        # GDAL < 3.6 kennt StripVertical nicht
-        info["horizontal_is_lv95"] = srs.GetAuthorityCode("PROJCS") == "2056"
-    info["vertical_epsg"] = srs.GetAuthorityCode("VERT_CS")
-    return info
-
-
-def decide_crs_action(info, target):
-    """
-    'ok' (Tag stimmt) oder 'set' (Tag setzen). ValueError, wenn das CRS im TIFF
-    dem Soll widerspricht: dann wird bewusst NICHT umgetaggt, sonst passten
-    Koordinaten und CRS nicht mehr zusammen (z.B. LV03-Daten als LV95 getaggt,
-    LHN95-Hoehen als LN02).
-    """
-    with_ln02 = target == CRS_LV95_LN02
-    if not info["has_crs"]:
-        if info["in_lv95_extent"]:
-            return "set"
-        raise ValueError(f"kein CRS im TIFF und Koordinaten ausserhalb LV95 - "
-                         f"{target} wird nicht gesetzt")
-    if not info["horizontal_is_lv95"]:
-        raise ValueError(f"CRS '{info['name']}' ist nicht LV95 (EPSG:2056)")
-    if not info["is_compound"]:
-        return "set" if with_ln02 else "ok"
-    if not with_ln02:
-        return "set"  # Hoehenbezug entfernen, siehe tiff_crs_target
-    if info["vertical_epsg"] == "5728":
-        return "ok"
-    raise ValueError(f"Hoehenbezug in '{info['name']}' ist nicht LN02 (EPSG:5728)")
-
-
-def set_raster_crs(file_path, target):
-    """Schreibt target als CRS-Tag - nur die GeoKeys, Pixel und Geotransformation
-    bleiben unveraendert. True, wenn das CRS danach dem Soll entspricht."""
-    srs = osr.SpatialReference()
-    srs.SetFromUserInput(target)
-    ds = gdal.Open(file_path, gdal.GA_Update)
-    if ds is None:
-        raise IOError(f"Konnte Raster nicht zum Schreiben oeffnen: {file_path}")
-    try:
-        if ds.SetSpatialRef(srs) != 0:
-            raise IOError(f"CRS konnte nicht gesetzt werden: {file_path}")
-    finally:
-        ds.FlushCache()
-        ds = None
-    try:
-        return decide_crs_action(read_crs_info(file_path), target) == "ok"
-    except ValueError:
-        return False
+# Soll-CRS und Pruef-/Setzlogik: gemeinsames Modul mit Script 2_2 und der
+# GUI-Vorpruefung (siehe _tiff_crs.py). Hier nur re-exportiert.
+from _tiff_crs import (CRS_LV95, CRS_LV95_LN02, tiff_crs_target, _in_lv95_extent,  # noqa: E402,F401
+                       read_crs_info, decide_crs_action, set_raster_crs)
+import _tiff_crs  # noqa: E402
 
 
 def ensure_tiff_crs(src, files, GDS, meta_info):
-    """
-    Prueft den CRS-Tag aller TIFF (read-only) und setzt ihn danach, wo noetig
-    (siehe tiff_crs_target). Widerspricht auch nur eine Kachel dem Soll, bricht
-    der Lauf ab, BEVOR eine Datei veraendert wurde.
-
-    SB_DSM: laesst sich LN02 nicht ins TIFF schreiben (GDAL ohne GeoTIFF 1.1),
-    nur Warnung - der Hoehenbezug steht auch im XML und in der STAC-Beschreibung.
-    """
-    targets = {fn: tiff_crs_target(GDS, meta_info, fn) for fn in files
-               if fn.lower().endswith(('.tif', '.tiff'))}
-    targets = {fn: t for fn, t in targets.items() if t}
-    if not targets:
-        return
-
-    actions, errors = {}, []
-    for fn, target in targets.items():
-        try:
-            actions[fn] = decide_crs_action(read_crs_info(os.path.join(src, fn)), target)
-        except Exception as e:
-            errors.append(f"{fn} (Soll {target}): {e}")
-    if errors:
-        log("[FEHLER] CRS-Pruefung - Daten pruefen, es wurde nichts veraendert:")
-        for e in errors:
-            log("   - " + e)
-        sys.exit(1)
-
-    to_set = [fn for fn in targets if actions[fn] == "set"]
-    not_persisted = [fn for fn in to_set if not set_raster_crs(os.path.join(src, fn), targets[fn])]
-    for target in sorted(set(targets.values())):
-        group = [fn for fn in targets if targets[fn] == target]
-        n_set = sum(1 for fn in group if actions[fn] == "set")
-        log(f"CRS-Tag {target}: {len(group) - n_set} Datei(en) bereits korrekt, {n_set} gesetzt.")
-
-    ln02_failed  = [fn for fn in not_persisted if targets[fn] == CRS_LV95_LN02]
-    other_failed = [fn for fn in not_persisted if targets[fn] != CRS_LV95_LN02]
-    if ln02_failed:
-        log(f"[WARNUNG] LN02 (EPSG:5728) liess sich bei {len(ln02_failed)} Datei(en) nicht "
-            f"ins TIFF schreiben (GDAL {gdal.__version__}) - horizontal EPSG:2056 gesetzt, "
-            f"LN02 steht im XML: " + ", ".join(ln02_failed))
-    if other_failed:
-        log("[FEHLER] CRS konnte nicht gesetzt werden: " + ", ".join(other_failed))
-        sys.exit(1)
-    log("")
+    """Siehe _tiff_crs.ensure_tiff_crs - Ausgabe ueber log()."""
+    _tiff_crs.ensure_tiff_crs(src, files, GDS, meta_info, log=log)
 
 
 # CRS-Tagging fuer SB_DSM_PUNKTWOLKE LAZ-Tiles gibt es hier nicht mehr - das
@@ -1114,7 +965,7 @@ def files_in_order(src, out, GDS, meta, workers=None):
         and fn.lower().endswith(('.tif', '.tiff', '.laz'))
     ]
 
-    # CRS-Tag pruefen/setzen (SB_DSM, SB_DOP mit DMC-4) - bricht ab, bevor eine
+    # CRS-Tag pruefen/setzen (SB_DSM, SB_DOP) - bricht ab, bevor eine
     # Kachel veraendert wird, falls eine dem Soll widerspricht
     ensure_tiff_crs(src, files, GDS, meta)
 
@@ -1301,10 +1152,10 @@ if __name__ == "__main__":
             # "swissALTI3D"
             # "swissALTI3D/DHM25"
             # "swissSURFACE3D"
-        "SourceReferenceSystem": "(EPSG:2056) CH1903+ / LV95_LN02",
+        "SourceReferenceSystem": "(EPSG:2056) CH1903+ / (EPSG:5728) LN02",
             # INPUT kontrollieren! only possible Value:
-            # ("EPSG:2056) CH1903+ / LV95_LN02"
-            # Ausnahme SB_DOP mit Leica DMC-4: "(EPSG:2056) CH1903+ / LV95_LHN95"
+            # "(EPSG:2056) CH1903+ / (EPSG:5728) LN02"
+            # Ausnahme SB_DOP / SB_DOP_16 (alle CameraSysteme): "(EPSG:2056) CH1903+"
         "CameraSystem": "Leica ADS100",
             # kontrollieren;
             # "Leica ADS100"

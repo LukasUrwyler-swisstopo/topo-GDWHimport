@@ -22,6 +22,7 @@ SCRIPT_3    = os.path.join(PROCESSING_DIR, "3_fix_false_nodata_dop.py")
 SCRIPT_4    = os.path.join(PROCESSING_DIR, "4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py")
 RUNNER_SCRIPT = os.path.join(PROCESSING_DIR, "_osgeo_runner.py")
 SCRIPT_PREVIEW = os.path.join(PROCESSING_DIR, "_tif_preview_reader.py")
+SCRIPT_TIFF_CRS = os.path.join(PROCESSING_DIR, "_tiff_crs.py")
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config", "_gdwh_config.json")
 
 # LineID-Formate je CameraSystem - gemeinsames Modul mit Script 1 (nur Standardbibliothek)
@@ -55,11 +56,23 @@ GDS_CUSTOM_ATTR_DMC = {
 # (ltgdwhi), "...\BUCKET\..." -> Produktiv-Portal (ltgdwh).
 CATALOG_HOST_PROD = "ltgdwh.adr.admin.ch"
 CATALOG_HOST_INT  = "ltgdwhi.adr.admin.ch"
-CATALOG_GDS_TYPES = ("SB_DOP", "SB_DOP_16", "SB_DSM", "SB_DSM_PUNKTWOLKE")
+CATALOG_GDS_TYPES = ("SB_DOP", "SB_DOP_16", "SB_DSM", "SB_DSM_PUNKTWOLKE", "SB_DOP_DMC")
+# DOP-GDS: SourceRefSys ohne Hoehenbezug, CRS-Vorpruefung der TIFF vor dem Start
+DOP_GDS = ("SB_DOP", "SB_DOP_16")
+# Eigener GDWH-Catalog fuer Leica DMC-4 (nur SB_DOP), alle anderen GDS wie bei ADS
+CATALOG_GDS_DMC = {"SB_DOP": "SB_DOP_DMC"}
+
+
+def _catalog_gds(gds, camera):
+    """Name des GDWH-Catalogs fuer gds/CameraSystem (SB_DOP + DMC-4 -> SB_DOP_DMC)."""
+    if _line_ids.is_dmc(camera):
+        return CATALOG_GDS_DMC.get(gds, gds)
+    return gds
 
 
 def _catalog_link(gds, ziel):
-    """Baut den GDWH-Catalog-Import-Link fuer gds, je nach BUCKET/BUCKET_INT im Zielpfad."""
+    """Baut den GDWH-Catalog-Import-Link fuer gds (Catalog-Name, siehe _catalog_gds),
+    je nach BUCKET/BUCKET_INT im Zielpfad."""
     if gds not in CATALOG_GDS_TYPES:
         return ""
     parts = [p for p in (ziel or "").replace("/", "\\").split("\\") if p]
@@ -77,11 +90,12 @@ CAMERA_SYSTEMS = ["Leica ADS100", "Leica ADS80", "Leica DMC-4"]
 # TerrainModel/SourceRefSys/CustomAttribute/SB_DOP_16 siehe _update_camera_meta_rules
 DMC_CAMERA        = _line_ids.DMC_CAMERA
 DMC_TERRAIN_MODEL = TERRAIN_MODELS[0]
-SOURCE_REF_SYS = "(EPSG:2056) CH1903+ / LV95_LN02"
-# SB_DOP mit DMC-4: DOP mit LHN95 gerechnet. Gleiche Form wie LV95_LN02 - der EPSG-Code
-# in Klammern bleibt horizontal (2056), der Hoehenbezug steht nur als Text. Im TIFF
-# selbst nur EPSG:2056 (siehe tiff_crs_target in Script 1).
-SOURCE_REF_SYS_DOP_DMC = "(EPSG:2056) CH1903+ / LV95_LHN95"
+SOURCE_REF_SYS = "(EPSG:2056) CH1903+ / (EPSG:5728) LN02"
+# SB_DOP und SB_DOP_16 (alle CameraSysteme): ein DOP ist ein 2D-Produkt ohne Hoehenwerte - nur
+# Lagebezug, kein Hoehenbezug (der Hoehenbezug der Orthorektifizierung gehoert nicht in
+# die Metadaten des Produkts). Bei DMC-4 im TIFF ebenfalls nur EPSG:2056 (siehe
+# tiff_crs_target in Script 1).
+SOURCE_REF_SYS_DOP = "(EPSG:2056) CH1903+"
 NODATA_DOP_OPT = ["0 0 0   (schwarz, 8BIT RGB)",     "255 255 255   (weiss, 8BIT RGB)"]
 NODATA_DOP_VAL = ["0 0 0",                            "255 255 255"]
 NODATA_D16_OPT = ["0 0 0 0   (schwarz, 16BIT NRGB)", "65535 65535 65535 65535   (weiss, 16BIT NRGB)"]
@@ -674,8 +688,9 @@ class SicherheitsCheckDialog(tk.Toplevel):
         if gds == "SB_DSM":
             _kv(sec1, "TIFF-CRS:", "DSM EPSG:2056+5728 (LV95 + LN02), Hillshade EPSG:2056 "
                                    "– wird geprüft und bei Bedarf gesetzt")
-        elif gds == "SB_DOP" and is_dmc:
-            _kv(sec1, "TIFF-CRS:", "EPSG:2056 (LV95) – wird geprüft und bei Bedarf gesetzt")
+        elif gds in DOP_GDS:
+            _kv(sec1, "TIFF-CRS:", "EPSG:2056 (LV95, ohne Höhenbezug) – wurde vorgeprüft, "
+                                   "wird bei Bedarf gesetzt")
         if gds == "SB_DSM_PUNKTWOLKE":
             _kv(sec1, "LAS 1.2 -> 1.4 Vorkonversion:",
                 "immer aktiv (CRS-Tag EPSG:2056+5728 wird byte-exakt gesetzt, siehe Log)")
@@ -1239,16 +1254,25 @@ class GDWHApp(tk.Tk):
                              command=self._on_gds_change
                              ).grid(row=0, column=col, padx=10, pady=4, sticky="nw")
 
-        # Datenpacket in GDWH erstellen – öffnet den GDWH-Catalog-Import-Link
-        # (PROD/INT) des aktuell gewählten GDS im Standardbrowser.
-        gdwh_frame = ttk.LabelFrame(self, text="Datenpacket in GDWH erstellen", padding=8, style="Section.TLabelframe")
-        gdwh_frame.pack(fill="x", padx=12, pady=(8, 0))
-        ttk.Button(gdwh_frame, text="GDWH-PROD",
-                    command=lambda: self._open_catalog_portal(CATALOG_HOST_PROD)
-                    ).pack(side="left", padx=(0, 8))
-        ttk.Button(gdwh_frame, text="GDWH-INT",
-                    command=lambda: self._open_catalog_portal(CATALOG_HOST_INT)
-                    ).pack(side="left")
+        # Kamera-Auswahl – direkt nach dem GDS, weil davon abhaengen: GDWH-Catalog
+        # (SB_DOP + DMC-4 -> SB_DOP_DMC, siehe _catalog_gds), NoData und "fixing
+        # false NoData pixels" (SB_DOP), TerrainModel, SourceRefSys, CustomAttribute
+        # und das LineID-Format. Ausserhalb von 'Pfade'/'Meta-Informationen', damit
+        # es von der Sperre SB_DOP_16 + DMC-4 (_set_form_locked) nie erfasst wird.
+        cam_frame = ttk.LabelFrame(self, text="Kamera-Auswahl", padding=8, style="Section.TLabelframe")
+        cam_frame.pack(fill="x", padx=12, pady=(8, 0))
+        ttk.Label(cam_frame, text="CameraSystem:", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(10, 0), pady=3)
+        self.camera_var = tk.StringVar(value=CAMERA_SYSTEMS[0])
+        self.camera_cb = ttk.Combobox(cam_frame, textvariable=self.camera_var, values=CAMERA_SYSTEMS,
+                                       state="readonly", width=20)
+        self.camera_cb.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=3)
+        self.camera_var.trace_add("write", lambda *_: self._on_camera_change())
+        self.camera_block_lbl = ttk.Label(cam_frame, font=("", 9, "bold"),
+            text="SB_DOP_16 gibt es mit Leica DMC-4 nicht – Import gesperrt "
+                 "(GDS oder CameraSystem wechseln)")
+        self.camera_block_lbl.grid(row=1, column=1, sticky="w", padx=(8, 0))
+        self.camera_block_lbl.grid_remove()
+        self._hint_labels.append(self.camera_block_lbl)
 
         # OSGeo4W Python Zeile
         self._osgeo_frame = ttk.Frame(self)
@@ -1377,24 +1401,6 @@ class GDWHApp(tk.Tk):
         self._dim_labels.append(area_hint)
         r += 2
 
-        # CameraSystem – bewusst direkt nach Area/vor TileKey/NoData:
-        # bei Leica DMC-4 ist NoData (SB_DOP) fix '0 0 0 0' und die "fixing false
-        # NoData pixels"-Option (siehe unten) entfaellt; ausserdem haengen
-        # TerrainModel, SourceRefSys, CustomAttribute und das LineID-Format davon ab.
-        ttk.Label(sec, text="CameraSystem:", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
-        self.camera_var = tk.StringVar(value=CAMERA_SYSTEMS[0])
-        self.camera_cb = ttk.Combobox(sec, textvariable=self.camera_var, values=CAMERA_SYSTEMS,
-                                       state="readonly", width=20)
-        self.camera_cb.grid(row=r, column=1, sticky="w", padx=(8, 0), pady=3)
-        self.camera_var.trace_add("write", lambda *_: self._on_camera_change())
-        self.camera_block_lbl = ttk.Label(sec, font=("", 9, "bold"),
-            text="SB_DOP_16 gibt es mit Leica DMC-4 nicht – Import gesperrt "
-                 "(GDS oder CameraSystem wechseln)")
-        self.camera_block_lbl.grid(row=r+1, column=1, sticky="w", padx=(8, 0))
-        self.camera_block_lbl.grid_remove()
-        self._hint_labels.append(self.camera_block_lbl)
-        r += 2
-
         # TileKey – reine Diagnose-Vorschau (Beispiel aus der ersten Datei),
         # nicht editierbar: TileKey wird pro Datei einzeln berechnet.
         ttk.Label(sec, text="TileKey (Beispiel):", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
@@ -1517,29 +1523,40 @@ class GDWHApp(tk.Tk):
     def _build_paths(self, parent):
         sec = ttk.LabelFrame(parent, text="Pfade", padding=10, style="Section.TLabelframe")
         sec.pack(fill="x", pady=(0, 6))
-        sec.columnconfigure(1, weight=1)
+        sec.columnconfigure(0, weight=1)
         self._paths_sec = sec
+        # Jede Zeile ist ein eigener Frame (Label | Entry | Button | Button),
+        # Spaltenbreiten angeglichen in _align_path_columns
         r = 0
 
         # Ziel (GDWH-BUCKET Path) – zuerst, damit das Zielpackage vor dem
-        # Data-Input Path gewählt wird
-        ttk.Label(sec, text="GDWH-BUCKET Path,\n(GDWH-Datapackage):", font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=3)
+        # Data-Input Path gewählt wird. Statt "Ordner…" die Buttons, die den
+        # GDWH-Catalog-Import-Link (PROD/INT) des gewählten GDS öffnen - der
+        # Pfad wird von dort kopiert.
+        self.ziel_frame = ttk.Frame(sec)
+        self.ziel_frame.grid(row=r, column=0, sticky="ew")
+        self.ziel_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.ziel_frame, text="GDWH-BUCKET Path,\n(GDWH-Datapackage):",
+                   font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", pady=3)
         self.ziel_var = tk.StringVar()
-        ttk.Entry(sec, textvariable=self.ziel_var
-                   ).grid(row=r, column=1, sticky="ew", padx=(8, 4), pady=3)
-        ttk.Button(sec, text="Ordner…",
-                    command=lambda: self._browse(self.ziel_var, must_exist=False)
-                    ).grid(row=r, column=2, pady=3)
-        ziel_hint = ttk.Label(sec,
+        ttk.Entry(self.ziel_frame, textvariable=self.ziel_var
+                   ).grid(row=0, column=1, sticky="ew", padx=(8, 4), pady=3)
+        ttk.Button(self.ziel_frame, text="GDWH-PROD",
+                    command=lambda: self._open_catalog_portal(CATALOG_HOST_PROD)
+                    ).grid(row=0, column=2, sticky="ew", pady=3)
+        ttk.Button(self.ziel_frame, text="GDWH-INT",
+                    command=lambda: self._open_catalog_portal(CATALOG_HOST_INT)
+                    ).grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=3)
+        ziel_hint = ttk.Label(self.ziel_frame,
             text="Enthält GDS-Ordner vorletzter Ebene  (z.B. …\\SB_DSM\\2025_AREA_DSM)",
             font=("", 8))
-        ziel_hint.grid(row=r+1, column=1, sticky="w", padx=(8, 0))
+        ziel_hint.grid(row=1, column=1, sticky="w", padx=(8, 0))
         self._dim_labels.append(ziel_hint)
         r += 1
 
         # INPUT_FOLDER (nur SB_DOP_16) – Data-Input Path wird automatisch abgeleitet
         self.if_frame = ttk.Frame(sec)
-        self.if_frame.grid(row=r, column=0, columnspan=3, sticky="ew")
+        self.if_frame.grid(row=r, column=0, sticky="ew")
         self.if_frame.columnconfigure(1, weight=1)
         ttk.Label(self.if_frame, text="INPUT_FOLDER\n(DOP_NRGB_16BITS\nHauptordner):",
                    justify="left", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", pady=3)
@@ -1548,11 +1565,11 @@ class GDWHApp(tk.Tk):
                    ).grid(row=0, column=1, sticky="ew", padx=(8, 4), pady=3)
         ttk.Button(self.if_frame, text="Ordner…",
                     command=lambda: self._browse(self.if_var)
-                    ).grid(row=0, column=2, pady=3)
+                    ).grid(row=0, column=2, sticky="ew", pady=3)
         self.if_checkbtn = tk.Button(self.if_frame, text="Check - NameFormat",
                     relief="flat", cursor="hand2",
                     command=lambda: self._check_name_format(self.if_var, self.if_checkbtn))
-        self.if_checkbtn.grid(row=0, column=3, padx=(4, 0), pady=3)
+        self.if_checkbtn.grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=3)
         self._check_format_btns.append(self.if_checkbtn)
         self.if_var.trace_add("write", lambda *_: self._reset_check_btn(self.if_checkbtn))
         self.if_var.trace_add("write", lambda *_: self._refresh_area_tilekey_preview())
@@ -1563,7 +1580,7 @@ class GDWHApp(tk.Tk):
 
         # Data-Input Path (für alle GDS ausser SB_DOP_16)
         self.quelle_frame = ttk.Frame(sec)
-        self.quelle_frame.grid(row=r, column=0, columnspan=3, sticky="ew")
+        self.quelle_frame.grid(row=r, column=0, sticky="ew")
         self.quelle_frame.columnconfigure(1, weight=1)
         ttk.Label(self.quelle_frame, text="Data-Input Path:", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", pady=3)
         self.quelle_var = tk.StringVar()
@@ -1571,17 +1588,35 @@ class GDWHApp(tk.Tk):
                    ).grid(row=0, column=1, sticky="ew", padx=(8, 4), pady=3)
         ttk.Button(self.quelle_frame, text="Ordner…",
                     command=lambda: self._browse(self.quelle_var)
-                    ).grid(row=0, column=2, pady=3)
+                    ).grid(row=0, column=2, sticky="ew", pady=3)
         self.quelle_checkbtn = tk.Button(self.quelle_frame, text="Check - NameFormat",
                     relief="flat", cursor="hand2",
                     command=lambda: self._check_name_format(self.quelle_var, self.quelle_checkbtn))
-        self.quelle_checkbtn.grid(row=0, column=3, padx=(4, 0), pady=3)
+        self.quelle_checkbtn.grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=3)
         self._check_format_btns.append(self.quelle_checkbtn)
         self.quelle_var.trace_add("write", lambda *_: self._reset_check_btn(self.quelle_checkbtn))
         self.quelle_var.trace_add("write", lambda *_: self._refresh_area_tilekey_preview())
         self.quelle_hint = ttk.Label(self.quelle_frame, font=("", 8))
         self.quelle_hint.grid(row=1, column=1, sticky="w", padx=(8, 0))
         self._dim_labels.append(self.quelle_hint)
+
+    def _align_path_columns(self):
+        """Gleiche Spaltenbreiten in Ziel-, INPUT_FOLDER- und Data-Input-Zeile, damit
+        Entries und Buttons exakt untereinander stehen (GDWH-PROD ueber 'Ordner…',
+        GDWH-INT ueber 'Check - NameFormat'). Grid-Spalten gelten nur je Frame,
+        darum minsize = breitestes Widget (inkl. padx) der Spalte ueber alle drei Frames."""
+        def _outer_width(w):
+            # padx kommt als Zahl (beidseitig) oder als Tupel (links, rechts)
+            padx = w.grid_info().get("padx", 0)
+            pads = [int(p) for p in padx] if isinstance(padx, (tuple, list)) else [int(padx)] * 2
+            return w.winfo_reqwidth() + sum(pads)
+
+        frames = (self.ziel_frame, self.if_frame, self.quelle_frame)
+        for col in (0, 2, 3):
+            width = max((_outer_width(w) for f in frames
+                         for w in f.grid_slaves(row=0, column=col)), default=0)
+            for f in frames:
+                f.columnconfigure(col, minsize=width)
 
     def _fwd_wheel_to_canvas(self, event):
         """Mausrad über Combobox scrollt den Canvas, ändert Auswahl nicht."""
@@ -1733,6 +1768,11 @@ class GDWHApp(tk.Tk):
         if hasattr(self, "start_btn"):
             self._update_start_btn_state()
 
+        # Button-Breiten haengen vom ttk-Theme ab (clam) und stehen erst nach dem
+        # naechsten Layout-Durchlauf fest - Pfad-Spalten danach angleichen
+        if hasattr(self, "quelle_frame"):
+            self.after_idle(self._align_path_columns)
+
         self._set_titlebar_dark(dark)
 
     # ── OSGeo4W Python Verwaltung ─────────────────────────────────────────────
@@ -1791,9 +1831,10 @@ class GDWHApp(tk.Tk):
     def _open_catalog_portal(self, host):
         """Oeffnet den GDWH-Catalog-Import-Link (PROD/INT) des gewaehlten GDS im Standardbrowser.
         Bei SB_DSM_PUNKTWOLKE wird vorher ein Hinweis zu den im Portal zu setzenden
-        Attributen angezeigt (Bestaetigung ueber "Weiter zum GDWH-PROD/-INT Portal")."""
+        Attributen angezeigt (Bestaetigung ueber "Weiter zum GDWH-PROD/-INT Portal").
+        SB_DOP mit Leica DMC-4 hat einen eigenen Catalog (SB_DOP_DMC, siehe _catalog_gds)."""
         gds = self.gds_var.get()
-        url = f"https://{host}/catalog-ng/catalog/{gds}/import"
+        url = f"https://{host}/catalog-ng/catalog/{_catalog_gds(gds, self.camera_var.get())}/import"
         if gds == "SB_DSM_PUNKTWOLKE":
             env_label = "PROD" if host == CATALOG_HOST_PROD else "INT"
             PunktwolkeAttributeHinweisDialog(self, url, env_label, dark=self._dark)
@@ -1915,16 +1956,17 @@ class GDWHApp(tk.Tk):
         return GDS_CUSTOM_ATTR[gds]
 
     def _source_ref_sys(self):
-        """SB_DSM/SB_DSM_PUNKTWOLKE bleiben immer LV95_LN02 (Wertebereich GDWH)."""
-        if self.gds_var.get() == "SB_DOP" and self.camera_var.get() == DMC_CAMERA:
-            return SOURCE_REF_SYS_DOP_DMC
+        """DOPs (SB_DOP, SB_DOP_16; alle CameraSysteme) nur Lagebezug,
+        SB_DSM/SB_DSM_PUNKTWOLKE LV95_LN02 (Wertebereich GDWH)."""
+        if self.gds_var.get() in DOP_GDS:
+            return SOURCE_REF_SYS_DOP
         return SOURCE_REF_SYS
 
     def _update_camera_meta_rules(self):
         """Meta-Regeln, die vom CameraSystem abhaengen (NoData siehe
         _update_camera_nodata_rules). Bei Leica DMC-4:
           - TerrainModel fix 'Digital Surface Model (...)', gesperrt (alle GDS)
-          - SB_DOP: SourceRefSys nur EPSG:2056, CustomAttribute RGBN
+          - SB_DOP: CustomAttribute RGBN
           - SB_DSM_PUNKTWOLKE: CustomAttribute mit RGB
           - SB_DOP_16: gibt es nicht - Formular gesperrt, IMPORT STARTEN rot
         Wird bei GDS- und CameraSystem-Wechsel aufgerufen."""
@@ -1949,10 +1991,10 @@ class GDWHApp(tk.Tk):
         self._update_start_btn_state()
 
     def _set_form_locked(self, locked):
-        """Sperrt alle Eingaben in 'Pfade' und 'Meta-Informationen' ausser dem
-        CameraSystem (sonst kaeme man aus der Sperre nicht mehr heraus) und stellt
-        beim Entsperren die vorherigen Zustaende wieder her. Die GDS-Auswahl liegt
-        ausserhalb dieser Bereiche und bleibt bedienbar."""
+        """Sperrt alle Eingaben in 'Pfade' und 'Meta-Informationen' und stellt beim
+        Entsperren die vorherigen Zustaende wieder her. GDS- und Kamera-Auswahl
+        liegen ausserhalb dieser Bereiche und bleiben bedienbar (sonst kaeme man
+        aus der Sperre nicht mehr heraus)."""
         if locked == self._form_locked or not hasattr(self, "_meta_sec"):
             return
         self._form_locked = locked
@@ -1966,7 +2008,7 @@ class GDWHApp(tk.Tk):
         while stack:
             w = stack.pop()
             stack.extend(w.winfo_children())
-            if w is self.camera_cb or not isinstance(
+            if not isinstance(
                     w, (ttk.Entry, ttk.Button, ttk.Checkbutton, tk.Button, tk.Listbox)):
                 continue
             try:
@@ -2444,7 +2486,8 @@ class GDWHApp(tk.Tk):
         self._progress_frame.pack_forget()
         if success:
             self._log("\n✓  Import erfolgreich abgeschlossen.\n")
-            gds  = self._pending_archive["gds"] if self._pending_archive else self.gds_var.get()
+            catalog_gds = (self._pending_archive["catalog_gds"] if self._pending_archive
+                           else _catalog_gds(self.gds_var.get(), self.camera_var.get()))
             ziel = self._pending_ziel or ""
             if self._pending_archive:
                 p = self._pending_archive
@@ -2461,7 +2504,7 @@ class GDWHApp(tk.Tk):
             # noch aktiv ist.
             self.fix_nodata_var.set(False)
             self._update_start_btn_state()
-            ImportDoneDialog(self, gds, ordner_name, ziel=ziel, dark=self._dark).wait()
+            ImportDoneDialog(self, catalog_gds, ordner_name, ziel=ziel, dark=self._dark).wait()
         else:
             self._pending_archive = None
             self._pending_ziel    = None
@@ -2636,16 +2679,30 @@ class GDWHApp(tk.Tk):
             quelle         = self.quelle_var.get().strip().strip('"')
             quelle_display = quelle
 
-        # Zielpfad-Warnung
+        # Zielpfad-Warnung - vorletzter Ordner = Catalog-Name, d.h. bei SB_DOP mit
+        # DMC-4 '...\SB_DOP_DMC\2026_AREA_DOP' (siehe _catalog_gds), sonst das GDS
         norm  = ziel.replace("/", "\\")
         parts = [p for p in norm.split("\\") if p]
-        if len(parts) >= 2 and parts[-2] != gds:
+        expected = _catalog_gds(gds, meta.get("CameraSystem", ""))
+        if len(parts) >= 2 and parts[-2] != expected:
             if not messagebox.askyesno("Zielpfad-Warnung",
-                f"Im Zielpfad wurde der GDS-Ordner '{gds}' nicht als vorletzten Ordner erkannt.\n\n"
-                f"Vorletzter Ordner:  '{parts[-2]}'\nErwartet:            '{gds}'\n\n"
+                f"Im Zielpfad wurde der GDS-Ordner '{expected}' nicht als vorletzten Ordner erkannt.\n\n"
+                f"Vorletzter Ordner:  '{parts[-2]}'\nErwartet:            '{expected}'\n\n"
                 f"Trotzdem fortfahren?", parent=self):
                 return
 
+        args = (gds, meta, quelle, quelle_display, ziel)
+        # Meldungen der CRS-Vorpruefung - erst nach dem Start ins Log (das wird
+        # beim Start geleert, die Logdatei erst dann geoeffnet)
+        self._crs_precheck_log = []
+        if gds in DOP_GDS:
+            # CRS-Tags der DOP-Kacheln vorab lesen (Hintergrund), weiter in _on_crs_precheck_done
+            self._start_crs_precheck(gds, meta, quelle, args)
+        else:
+            self._start_import_confirmed(*args)
+
+    def _start_import_confirmed(self, gds, meta, quelle, quelle_display, ziel):
+        """Zweiter Teil von _start_import: Sicherheitscheck und Start."""
         # Sicherheitscheck
         # StacItemIdDatetime der ersten Linie - dieselbe Regel wie das XML (Script 1)
         stac_dt = _line_ids.stac_datetime(meta.get("Line_ID", []), meta.get("CameraSystem", ""))
@@ -2688,6 +2745,7 @@ class GDWHApp(tk.Tk):
         # Archiv-Log-Parameter merken – Eintrag wird erst nach erfolgreichem Abschluss geschrieben
         self._pending_archive = {
             "gds":         gds,
+            "catalog_gds": _catalog_gds(gds, meta.get("CameraSystem", "")),
             "area":        area_s,
             "line_id":     line_s,
             "stac_dt":     stac_dt,
@@ -2696,12 +2754,160 @@ class GDWHApp(tk.Tk):
         self._pending_ziel = ziel
 
         self._log(f"=== GDWH Import gestartet – GDS: {gds} ===\n\n")
+        for line in getattr(self, "_crs_precheck_log", []):
+            self._log(line)
+        if getattr(self, "_crs_precheck_log", None):
+            self._log("\n")
+        self._crs_precheck_log = []
 
         threading.Thread(
             target=self._run_thread,
             args=(gds, meta, quelle, ziel),
             daemon=True
         ).start()
+
+    # ── CRS-Vorprüfung DOP (vor dem Sicherheitscheck) ────────────────────────
+    @staticmethod
+    def _dop_tiffs_for_crs_check(gds, quelle, meta):
+        """TIFF-Pfade, die der Import verarbeitet. SB_DOP: Quellordner (ohne
+        Unterordner, wie Script 1). SB_DOP_16: Kacheln der Line_ID ('<HHMM>NRGB'
+        im Namen) im INPUT_FOLDER und im Unterordner <HHMM> - vor dem Start sind
+        sie evtl. noch nicht von Script 2_1 einsortiert."""
+        exts = ('.tif', '.tiff')
+        if gds != "SB_DOP_16":
+            folders, band_id = [quelle], None
+        else:
+            band_id = meta["Line_ID"][0][9:13]
+            folders = [quelle, os.path.join(quelle, band_id)]
+        paths = []
+        for folder in folders:
+            if not os.path.isdir(folder):
+                continue
+            for fn in sorted(os.listdir(folder)):
+                path = os.path.join(folder, fn)
+                if not (fn.lower().endswith(exts) and os.path.isfile(path)):
+                    continue
+                if band_id and f"{band_id}NRGB" not in fn.upper():
+                    continue
+                paths.append(path)
+        return paths
+
+    def _start_crs_precheck(self, gds, meta, quelle, args):
+        try:
+            paths = self._dop_tiffs_for_crs_check(gds, quelle, meta)
+        except Exception as e:
+            paths, err = [], e
+        else:
+            err = None
+        if err or not paths:
+            # Nichts zu pruefen oder Ordner nicht lesbar - Script 1/2_2 prueft zur Laufzeit
+            if err:
+                self._crs_precheck_log.append(f"[WARNUNG] CRS-Vorprüfung: Quellordner nicht lesbar ({err})\n")
+            self._start_import_confirmed(*args)
+            return
+
+        self._running = True
+        T = DARK if self._dark else LIGHT
+        self.start_btn.config(state="disabled", fg=T["fg_dim"], disabledforeground=T["fg_dim"])
+        self._progress_lbl.config(text=f"CRS-Vorprüfung ({len(paths)} TIFF)…")
+        self._progress_frame.pack(fill="x", padx=12, pady=(0, 4), before=self._btn_row)
+        self._progress_bar.start(10)
+        threading.Thread(target=self._run_crs_precheck,
+                         args=(gds, meta, paths, args), daemon=True).start()
+
+    def _run_crs_precheck(self, gds, meta, paths, args):
+        """Hintergrund-Thread: liest die CRS-Tags via OSGeo4W Python (_tiff_crs.py,
+        nur lesend). Ergebnis-Dict oder {'failed': meldung}."""
+        cfg_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False,
+                                             encoding="utf-8") as tmp:
+                json.dump({"gds": gds, "meta_info": meta, "files": paths}, tmp, ensure_ascii=False)
+                cfg_path = tmp.name
+            env = os.environ.copy()
+            env["PYTHONHOME"] = _detect_python_home(self._osgeo_python)
+            env["PYTHONNOUSERSITE"] = "1"  # siehe _exec_with_osgeo (ABI-Konflikt-Schutz)
+            proc = subprocess.run(
+                [self._osgeo_python, SCRIPT_TIFF_CRS, cfg_path],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                universal_newlines=True, encoding="utf-8", errors="replace",
+                env=env, timeout=900,
+            )
+            lines = [l for l in proc.stdout.splitlines() if l.strip()]
+            try:
+                result = json.loads(lines[-1]) if lines else {}
+            except ValueError:
+                result = {}
+            if proc.returncode != 0 or not isinstance(result, dict) or "targets" not in result:
+                result = {"failed": result.get("failed") if isinstance(result, dict) and result.get("failed")
+                          else (proc.stdout.strip()[-500:] or f"Exit-Code {proc.returncode}")}
+        except Exception as e:
+            result = {"failed": str(e)}
+        finally:
+            if cfg_path:
+                try: os.unlink(cfg_path)
+                except OSError: pass
+        self.after(0, lambda: self._on_crs_precheck_done(result, args))
+
+    @staticmethod
+    def _file_list(entries, limit=12):
+        lines = [f"  - {fn}:  {msg}" if msg else f"  - {fn}" for fn, msg in entries[:limit]]
+        if len(entries) > limit:
+            lines.append(f"  … und {len(entries) - limit} weitere (siehe Log)")
+        return "\n".join(lines)
+
+    def _on_crs_precheck_done(self, result, args):
+        self._progress_bar.stop()
+        self._progress_frame.pack_forget()
+        self._progress_lbl.config(text="Verarbeitung läuft…")
+        self._running = False
+        self._update_start_btn_state()
+
+        note = self._crs_precheck_log.append
+        if "failed" in result:
+            note(f"[WARNUNG] CRS-Vorprüfung nicht möglich: {result['failed']}\n")
+            if not messagebox.askyesno("CRS-Vorprüfung",
+                    "Die CRS-Tags der DOP-Kacheln konnten vorab nicht gelesen werden:\n\n"
+                    f"{str(result['failed'])[:400]}\n\n"
+                    "Der Import prüft die Tags während der Verarbeitung nochmals "
+                    "(Abbruch bei widersprüchlichem CRS, falscher Höhenbezug nur als "
+                    "Warnung im Log).\n\nTrotzdem fortfahren?", icon="warning", parent=self):
+                return
+            self._start_import_confirmed(*args)
+            return
+
+        errors, warns = result.get("error", []), result.get("warn", [])
+        n_set = len(result.get("set", []))
+        if errors:
+            for fn, msg in errors:
+                self._log(f"[FEHLER] CRS: {fn}: {msg}\n")
+            messagebox.showerror("CRS-Vorprüfung",
+                f"{len(errors)} DOP-Kachel(n) haben ein CRS, das nicht zu LV95 (EPSG:2056) "
+                f"passt - der Import würde abbrechen:\n\n{self._file_list(errors)}\n\n"
+                "Bitte die Daten prüfen. Es wurde nichts verändert.", parent=self)
+            return
+
+        if warns:
+            for fn, msg in warns:
+                note(f"[WARNUNG] CRS: {fn}: {msg}\n")
+            if not messagebox.askyesno("CRS-Vorprüfung – falscher Höhenbezug",
+                    f"{len(warns)} DOP-Kachel(n) tragen im CRS-Tag einen Höhenbezug, der "
+                    f"nicht LN02 ist:\n\n{self._file_list(warns)}\n\n"
+                    "Bitte prüfen, ob nur der Tag falsch gesetzt ist oder ob das DOP mit "
+                    "dem falschen Höhenbezug orthorektifiziert wurde. Ein Höhenfehler "
+                    "des Oberflächenmodells verschiebt das DOP in der Lage "
+                    "(Versatz ≈ Höhenfehler × tan(Blickwinkel), v.a. in steilem Gelände "
+                    "und am Bildrand).\n\n"
+                    "Ja = Tags auf EPSG:2056 (ohne Höhenbezug) setzen und fortfahren\n"
+                    "Nein = Import abbrechen, nichts wird verändert",
+                    icon="warning", default="no", parent=self):
+                return
+            note(f"CRS-Vorprüfung: Höhenbezug-Warnung für {len(warns)} Kachel(n) "
+                 f"bestätigt - Tags werden auf EPSG:2056 gesetzt.\n")
+        n_all = len(result.get("targets", {}))
+        note(f"CRS-Vorprüfung: {n_all} TIFF geprüft, {n_all - n_set - len(warns)} "
+             f"korrekt, {n_set + len(warns)} werden beim Import auf EPSG:2056 gesetzt.\n")
+        self._start_import_confirmed(*args)
 
     # ── Import-Thread ─────────────────────────────────────────────────────────
     def _run_thread(self, gds, meta, quelle, ziel):

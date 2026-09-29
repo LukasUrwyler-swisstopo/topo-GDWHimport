@@ -18,6 +18,9 @@ eigentlichen GDWH-Import
 in ein separates Zielverzeichnis, die Quelldateien bleiben unveraendert.
 
 Vorgehen pro Tile (siehe Docstrings der einzelnen Funktionen fuer Details):
+  0. CRS der Quelle pruefen (check_source_crs): Hoehenbezug LHN95 bzw. nicht
+     LN02, oder horizontal nicht LV95 -> Kachel schlaegt fehl, der Import
+     bricht ab. Ohne CRS oder EPSG:2056(+5728) geht es weiter.
   1. Kachelursprung deterministisch aus dem Dateinamen parsen (Regex), NICHT
      aus dem Datenminimum. Plausibilitaetspruefung gegen die Schweizer
      Landesgrenzen (LV95, in km). Kachelrahmen-Pruefung (1x1 km):
@@ -450,6 +453,35 @@ def resolve_crs_epsg(metadata):
     return horizontal_epsg, vertical_epsg
 
 
+def check_source_crs(metadata, filename):
+    """CRS der QUELLE pruefen, bevor irgendetwas geschrieben wird - analog zum
+    TIFF bei SB_DSM (_tiff_crs.decide_crs_action). ValueError bei:
+      - Hoehenbezug nicht LN02 (z.B. LHN95/EPSG:5729): die Referenz-VLRs wuerden
+        sonst LHN95-Hoehen still als LN02 deklarieren (Koordinaten bleiben
+        unveraendert, es gibt keine Reprojektion)
+      - horizontal aufloesbar, aber nicht LV95 (EPSG:2056)
+    Erlaubt: kein CRS (typisch ADS, LAS 1.2), bedeutungsloses LOCAL_CS (siehe
+    inject_reference_vlrs), EPSG:2056 ohne Hoehenbezug, EPSG:2056+5728."""
+    h_epsg, v_epsg = resolve_crs_epsg(metadata)
+    md = metadata.get("metadata") or {}
+    srs = md.get("srs") or {}
+    wkt_text = " ".join(str(t or "") for t in (md.get("spatialreference"), srs.get("wkt"),
+                                                  srs.get("compoundwkt"), srs.get("vertical")))
+    # Text zusaetzlich, falls die Vertikalkomponente keine EPSG-ID traegt
+    # (AUTHORITY["EPSG","5729"] bzw. ID["EPSG",5729])
+    if (v_epsg == 5729 or "LHN95" in wkt_text.upper()
+            or re.search(r'EPSG"?\s*,\s*"?5729\b', wkt_text)):
+        raise ValueError(f"{filename}: Hoehenbezug der Quelle ist LHN95 (EPSG:5729) statt LN02 "
+                         f"(EPSG:5728) - Kachel wird nicht konvertiert. Daten pruefen: nur der Tag "
+                         f"falsch oder Hoehen wirklich in LHN95 (dann zuerst nach LN02 reframen).")
+    if v_epsg is not None and v_epsg != 5728:
+        raise ValueError(f"{filename}: Hoehenbezug der Quelle ist EPSG:{v_epsg} statt LN02 "
+                         f"(EPSG:5728) - Kachel wird nicht konvertiert.")
+    if h_epsg is not None and h_epsg != 2056:
+        raise ValueError(f"{filename}: CRS der Quelle ist EPSG:{h_epsg} statt LV95 (EPSG:2056) "
+                         f"- Kachel wird nicht konvertiert.")
+
+
 def is_already_migrated(metadata, point_format=TARGET_POINT_FORMAT):
     """True, wenn die Datei bereits LAS 1.4 im Zielformat point_format (PF6
     bzw. PF7, siehe choose_target_point_format) mit korrektem CRS (2056+5728)
@@ -797,6 +829,13 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=F
         src_meta = pdal_metadata(src_path)
     except Exception as e:
         result["error"] = f"Quelldatei nicht lesbar (pdal info): {e}"
+        return result
+
+    # LHN95 o.ae. in der Quelle blockiert die Kachel (siehe check_source_crs)
+    try:
+        check_source_crs(src_meta, name)
+    except ValueError as e:
+        result["error"] = str(e)
         return result
 
     try:

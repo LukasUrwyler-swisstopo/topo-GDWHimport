@@ -1433,12 +1433,12 @@ class TestLineIdXmlFields(unittest.TestCase):
         tif = os.path.join(tmpdir, "2026_GUPPENFIRN_DOP_10cm_RGBN_2713_1204_LV95.tif")
         open(tif, "w").close()
         meta = {"Auftragstyp": "kry", "Line_ID": [_DMC_004, _DMC_003], "CameraSystem": DMC,
-                "NoData": "0 0 0 0", "SourceReferenceSystem": "(EPSG:2056) CH1903+ / LV95_LHN95"}
+                "NoData": "0 0 0 0", "SourceReferenceSystem": "(EPSG:2056) CH1903+"}
         xml_path, _, first = allGDS.create_xml(tif, "SB_DOP", meta, cached_raster_attrs={})
         with open(xml_path, encoding="utf-8") as f:
             content = f.read()
         self.assertIn("<LineID>20260813_0822_41216_082221,20260813_0822_41216_082750</LineID>", content)
-        self.assertIn("<CoordinateReferenceSystem>(EPSG:2056) CH1903+ / LV95_LHN95</CoordinateReferenceSystem>", content)
+        self.assertIn("<CoordinateReferenceSystem>(EPSG:2056) CH1903+</CoordinateReferenceSystem>", content)
         self.assertIn("<NoData>0 0 0 0</NoData>", content)
         self.assertEqual(first, "2026-08-13T08:22:21.00")
 
@@ -1466,7 +1466,8 @@ class TestTiffCrs(unittest.TestCase):
         self.assertEqual(allGDS.tiff_crs_target("SB_DSM", {"CameraSystem": ADS},
                                                 "2026_GUPPENFIRN_hillshade_50cm_LV95_LN02.tif"), self.LV95)
         self.assertEqual(allGDS.tiff_crs_target("SB_DOP", {"CameraSystem": DMC}), self.LV95)
-        self.assertIsNone(allGDS.tiff_crs_target("SB_DOP", {"CameraSystem": ADS}))
+        self.assertEqual(allGDS.tiff_crs_target("SB_DOP", {"CameraSystem": ADS}), self.LV95)
+        self.assertEqual(allGDS.tiff_crs_target("SB_DOP_16", {"CameraSystem": ADS}), self.LV95)
         self.assertIsNone(allGDS.tiff_crs_target("SB_DSM_PUNKTWOLKE", {"CameraSystem": DMC}))
 
     def test_dop_lv95_bleibt_unveraendert(self):
@@ -1526,18 +1527,18 @@ class TestDmcMetaGuiRegeln(_GuiAppTestCase):
     def test_sb_dop_dmc_meta(self):
         self._waehle("SB_DOP", DMC)
         meta = self.app._build_meta_info()
-        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+ / LV95_LHN95")
+        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+")
         self.assertEqual(meta["CustomAttribute"], "Digital OrthoPhoto - Mosaic RGBN 8BIT")
         self.assertEqual(meta["TerrainModel"], self.gui.DMC_TERRAIN_MODEL)
 
     def test_dsm_und_punktwolke_bleiben_ln02(self):
         self._waehle("SB_DSM", DMC)
         meta = self.app._build_meta_info()
-        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+ / LV95_LN02")
+        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+ / (EPSG:5728) LN02")
         self.assertEqual(meta["CustomAttribute"], self.gui.GDS_CUSTOM_ATTR["SB_DSM"])
         self._waehle("SB_DSM_PUNKTWOLKE", DMC)
         meta = self.app._build_meta_info()
-        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+ / LV95_LN02")
+        self.assertEqual(meta["SourceReferenceSystem"], "(EPSG:2056) CH1903+ / (EPSG:5728) LN02")
         self.assertEqual(meta["CustomAttribute"],
                          "Digital Surface Model - PointCloud LAZ RGB (DSM photogrammetric autocorrelation)")
 

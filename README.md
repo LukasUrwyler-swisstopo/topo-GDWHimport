@@ -21,15 +21,15 @@ Alle Angaben (GDS, Pfade, Meta-Informationen) werden direkt im GUI ausgefüllt �
 
 ## Was kann das Tool?
 
-- **GDS auswählen** und passendes Datenpaket im GDWH-Portal öffnen (Button)
-- **Meta-Informationen** interaktiv erfassen (Area, NoData, Kamerasystem, Line_IDs, …)
+- **GDS und Kamera auswählen** und passendes Datenpaket im GDWH-Portal öffnen (Buttons „GDWH-PROD“/„GDWH-INT“ neben dem GDWH-BUCKET Path; SB_DOP mit DMC-4 → Catalog `SB_DOP_DMC`)
+- **Meta-Informationen** interaktiv erfassen (Area, NoData, Line_IDs, …)
 - **Quellordner automatisch bereinigen** (nur relevante Dateien behalten)
 - **XML-Metadaten** pro Datei generieren
 - **NoData-Tag & Maske** im TIFF setzen
 - **Daten ins GDWH-Bucket kopieren** inkl. `files.csv` (Hash, TileKey, Footprint)
 - Optionale Zusatzfunktion (siehe unten): falsche NoData-Pixel korrigieren
 - Bei `SB_DSM_PUNKTWOLKE`: automatische LAS-1.4-Vorkonversion vor dem Import (CRS-Tag byte-exakt; Punktformat PF6, bei `Leica DMC-4` PF7 mit Farbe)
-- **CRS-Tag im TIFF** prüfen und bei Bedarf setzen (`SB_DSM`-DSM: `EPSG:2056+5728`, `SB_DSM`-Hillshade und `SB_DOP` mit `Leica DMC-4`: `EPSG:2056`)
+- **CRS-Tag im TIFF** prüfen und bei Bedarf setzen (`SB_DSM`-DSM: `EPSG:2056+5728`, `SB_DSM`-Hillshade, `SB_DOP` und `SB_DOP_16`: `EPSG:2056`), bei DOPs mit Vorprüfung im GUI
 
 Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 
@@ -51,20 +51,22 @@ Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 ## Ablauf im GUI
 
 ```
-1. GDS wählen
-2. Datenpaket im Portal anlegen  (Button "GDWH-PROD" / "GDWH-INT")
-3. Meta-Informationen eingeben  (Dropdowns / Freitext)
-4. Quell- und Zielpfad eingeben
-5. Sicherheitscheck bestätigen  (Kontrollfragen)
-6. Import starten
+1. GDS und Kamera (CameraSystem) wählen
+2. Datenpaket im Portal anlegen  (Button "GDWH-PROD" / "GDWH-INT" neben dem GDWH-BUCKET Path,
+   SB_DOP mit DMC-4 -> Catalog SB_DOP_DMC)
+3. Quell- und Zielpfad eingeben
+4. Meta-Informationen eingeben  (Dropdowns / Freitext)
+5. (nur SB_DOP / SB_DOP_16) CRS-Vorprüfung der TIFF, Dialog bei falschem Höhenbezug
+6. Sicherheitscheck bestätigen  (Kontrollfragen)
+7. Import starten
    → (nur SB_DSM_PUNKTWOLKE: LAS-1.4-Vorkonversion, automatisch)
    → Quellordner bereinigen
-   → CRS-Tag im TIFF prüfen/setzen  (nur SB_DSM und SB_DOP mit DMC-4)
+   → CRS-Tag im TIFF prüfen/setzen  (SB_DSM, SB_DOP, SB_DOP_16)
    → XML generieren
    → NoData-Tag & Maske setzen  (nur Raster)
    → Daten ins Bucket kopieren + files.csv erstellen
-7. GDWH-Portal: Datenpaket prüfen (CHECK) und importieren
-8. STAC-Import läuft automatisch
+8. GDWH-Portal: Datenpaket prüfen (CHECK) und importieren
+9. STAC-Import läuft automatisch
 ```
 
 Der **Import-Button** bleibt gesperrt, bis alle Pflichtfelder ausgefüllt sind.
@@ -79,8 +81,8 @@ Der **Import-Button** bleibt gesperrt, bis alle Pflichtfelder ausgefüllt sind.
 | `Area` | AOI-Name, wird aus dem Quellordner vorgeschlagen, ist aber editierbar |
 | `NoData` | NoData-Quellwert (bestimmt v.a. bei SB_DOP/SB_DOP_16 die Maskenberechnung) |
 | `TerrainModel` | verwendetes Geländemodell (bei DMC-4 fix DSM) |
-| `CameraSystem` | Kamerasystem (Leica ADS100 / ADS80 / DMC-4). Bei DMC-4 gelten Sonderregeln, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln) |
-| `SourceRefSys` | fix `(EPSG:2056) CH1903+ / LV95_LN02`, bei `SB_DOP` mit DMC-4 `(EPSG:2056) CH1903+ / LV95_LHN95` |
+| `CameraSystem` | Kamerasystem (Leica ADS100 / ADS80 / DMC-4), gewählt im Kasten „Kamera-Auswahl“ unter der GDS-Auswahl. Bei DMC-4 gelten Sonderregeln, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln) |
+| `SourceRefSys` | automatisch je GDS: `SB_DOP` und `SB_DOP_16` `(EPSG:2056) CH1903+` (DOP = 2D-Produkt ohne Höhenwerte, nur Lagebezug), `SB_DSM` und `SB_DSM_PUNKTWOLKE` `(EPSG:2056) CH1903+ / (EPSG:5728) LN02` |
 | `CustomAttribute` | Beschreibung des Datenprodukts (automatisch je GDS und CameraSystem) |
 | `Line_ID(s)` | Befliegungslinien – werden automatisch chronologisch sortiert; mehrere Zeilen per Copy/Paste aus Excel möglich. Format je CameraSystem, siehe [LineIDs bei DMC-4](#lineids-bei-dmc-4) |
 
@@ -90,16 +92,17 @@ Der **Import-Button** bleibt gesperrt, bis alle Pflichtfelder ausgefüllt sind.
 
 ## Leica DMC-4: Sonderregeln
 
-Ist im GUI `CameraSystem` = `Leica DMC-4` gewählt, gilt:
+Ist im GUI unter „Kamera-Auswahl“ `CameraSystem` = `Leica DMC-4` gewählt, gilt:
 
 | GDS | Verhalten | Grund |
 |-----|-----------|-------|
 | alle | `TerrainModel` fix `Digital Surface Model (DSM photogrammetric autocorrelation)`, Dropdown gesperrt; LineIDs im DMC-Format, siehe [LineIDs bei DMC-4](#lineids-bei-dmc-4) | |
+| `SB_DOP` | GDWH-Catalog `SB_DOP_DMC` statt `SB_DOP` (Buttons „GDWH-PROD“/„GDWH-INT“ und Link im Abschluss-Dialog); GDWH-BUCKET Path `…\SB_DOP_DMC\2026_AREA_DOP`, sonst Zielpfad-Warnung | Eigener Catalog im GDWH für DMC-DOPs. |
 | `SB_DOP` | NoData immer `0 0 0 0` (vier Werte, Dropdown gesperrt), Option „fixing false NoData pixels“ ausgeblendet und aus | Die DMC-Pipeline (Reality Studio → `topo-DMCdataConverter`) liefert seit der Umstellung **4-Band RGBN** (8bit), schreibt NoData immer schwarz und erzeugt keine falschen NoData-Pixel in den Nutzdaten. |
-| `SB_DOP` | `CustomAttribute` = `Digital OrthoPhoto - Mosaic RGBN 8BIT`; `SourceRefSys` = `(EPSG:2056) CH1903+ / LV95_LHN95`; CRS-Tag im TIFF = `EPSG:2056` (ohne Höhenbezug) | Das DOP wird mit LHN95 gerechnet. Im XML steht LHN95 nur als Text – gleiche Form wie `LV95_LN02`, der EPSG-Code in Klammern bleibt horizontal. |
+| `SB_DOP` | `CustomAttribute` = `Digital OrthoPhoto - Mosaic RGBN 8BIT` | Die DMC-Pipeline liefert seit der Umstellung 4-Band RGBN. |
 | `SB_DOP_16` | gibt es nicht – Formular gesperrt, **IMPORT STARTEN** rot und deaktiviert (GDS und CameraSystem bleiben wählbar) | DMC liefert keine ADS-Einzellinien. |
-| `SB_DSM` | wie ADS, `SourceRefSys` bleibt `LV95_LN02` | |
-| `SB_DSM_PUNKTWOLKE` | immer **PF7** (PF6 + RGB), Kachel ohne RGB-Werte = **Abbruch**; `CustomAttribute` = `Digital Surface Model - PointCloud LAZ RGB (DSM photogrammetric autocorrelation)`; `SourceRefSys` bleibt `LV95_LN02` | Die Farbe der DMC-Punktwolke soll bis ins GDWH-Produkt erhalten bleiben, das XML nennt RGB. |
+| `SB_DSM` | wie ADS, `SourceRefSys` bleibt `(EPSG:2056) CH1903+ / (EPSG:5728) LN02` | |
+| `SB_DSM_PUNKTWOLKE` | immer **PF7** (PF6 + RGB), Kachel ohne RGB-Werte = **Abbruch**; `CustomAttribute` = `Digital Surface Model - PointCloud LAZ RGB (DSM photogrammetric autocorrelation)`; `SourceRefSys` bleibt `(EPSG:2056) CH1903+ / (EPSG:5728) LN02` | Die Farbe der DMC-Punktwolke soll bis ins GDWH-Produkt erhalten bleiben, das XML nennt RGB. |
 
 ### LineIDs bei DMC-4
 
@@ -175,10 +178,22 @@ Bei ADS (ADS100 / ADS80) gilt: NoData frei wählbar, Vorkorrektur optional, Terr
 Vereinzelte Pixel/kleine Gruppen, die zufällig dem NoData-Wert entsprechen (z.B. dunkle Schatten, überstrahlte Flächen), aber eigentlich gültige Nutzdaten sind, werden vor dem Import erkannt und korrigiert, damit sie nicht fälschlich als NoData maskiert werden. Je nach DOP-Grösse dauert das einige Zeit; die Checkbox wird nach jedem erfolgreichen Import wieder zurückgesetzt.
 
 **LAS-1.4-Vorkonversion** *(nur SB_DSM_PUNKTWOLKE, immer aktiv, keine Checkbox)*
-Bringt die Punktwolken-Kacheln (LAZ) vor dem Import ins GDWH-Format: LAS 1.4, PF6 (bzw. PF7 mit Farbe bei DMC-4, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln)), Scale 0.01, Offset = Kachelursprung, CRS `EPSG:2056+5728` – strukturell kongruent zu swissSURFACE3D. Das CRS wird byte-exakt aus einer verifizierten Referenzkachel injiziert (keine Reprojektion, keine Neuberechnung des WKT). Typischer Fall sind ADS-Kacheln in LAS 1.2/PF1 ohne CRS-Angabe; Kacheln, die schon im Zielformat vorliegen (z.B. die fertigen `…_LV95_LN02.laz` aus dem DMC-Converter), werden nur kopiert. Läuft automatisch auf einer Arbeitskopie; die Quellkacheln bleiben unverändert. Details siehe [4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py](processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py).
+Bringt die Punktwolken-Kacheln (LAZ) vor dem Import ins GDWH-Format: LAS 1.4, PF6 (bzw. PF7 mit Farbe bei DMC-4, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln)), Scale 0.01, Offset = Kachelursprung, CRS `EPSG:2056+5728` – strukturell kongruent zu swissSURFACE3D. Das CRS wird byte-exakt aus einer verifizierten Referenzkachel injiziert (keine Reprojektion, keine Neuberechnung des WKT). Typischer Fall sind ADS-Kacheln in LAS 1.2/PF1 ohne CRS-Angabe; Kacheln, die schon im Zielformat vorliegen (z.B. die fertigen `…_LV95_LN02.laz` aus dem DMC-Converter), werden nur kopiert. Läuft automatisch auf einer Arbeitskopie; die Quellkacheln bleiben unverändert. **CRS der Quelle** wird vorher geprüft, analog zum DSM-TIFF: ohne CRS, `EPSG:2056` oder `EPSG:2056+5728` geht es weiter. Ein Höhenbezug **LHN95** (`EPSG:5729`) oder ein anderer als LN02 sowie ein horizontales CRS ausser LV95 **blockieren** die Kachel, und der Import bricht ab, bevor Script 1 startet. Sonst würden die Referenz-Einträge LHN95-Höhen stillschweigend als LN02 ausweisen, denn es gibt keine Reprojektion. Details siehe [4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py](processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py).
 
-**CRS-Tag im TIFF** *(SB_DSM und SB_DOP mit DMC-4, immer aktiv, keine Checkbox)*
-Vor der XML-Erzeugung wird das CRS aller TIFF gelesen (nur Header). Soll: `SB_DSM`-DSM `EPSG:2056+5728` (LV95 + LN02, als GeoTIFF 1.1 mit VerticalGeoKey, OGC 19-008r4), `SB_DSM`-Hillshade (`_hillshade_` im Dateinamen, reine Darstellung) und `SB_DOP` mit DMC-4 `EPSG:2056`. Fehlt das CRS (Koordinaten müssen in LV95 liegen) oder fehlt/stört der Höhenbezug, wird nur der Tag geschrieben – Pixel und Geotransformation bleiben unverändert. Widerspricht eine Kachel dem Soll (z.B. LV03, oder LHN95 bei SB_DSM), bricht der Import ab, **bevor** eine Datei verändert wird. Lässt sich LN02 nicht ins TIFF schreiben (GDAL ohne GeoTIFF 1.1), gibt es nur eine Warnung.
+**CRS-Tag im TIFF** *(SB_DSM, SB_DOP, SB_DOP_16, alle CameraSysteme, immer aktiv, keine Checkbox)*
+Vor der XML-Erzeugung wird das CRS aller TIFF gelesen (nur Header). Soll: `SB_DSM`-DSM `EPSG:2056+5728` (LV95 + LN02, als GeoTIFF 1.1 mit VerticalGeoKey, OGC 19-008r4), `SB_DSM`-Hillshade (`_hillshade_` im Dateinamen, reine Darstellung), `SB_DOP` und `SB_DOP_16` `EPSG:2056`. Fehlt das CRS (Koordinaten müssen in LV95 liegen) oder fehlt/stört der Höhenbezug, wird nur der Tag geschrieben – Pixel und Geotransformation bleiben unverändert. Widerspricht eine Kachel dem Soll (z.B. LV03, oder LHN95 bei SB_DSM), bricht der Import ab, **bevor** eine Datei verändert wird. Lässt sich LN02 nicht ins TIFF schreiben (GDAL ohne GeoTIFF 1.1), gibt es nur eine Warnung. Die Logik liegt in [`processingScripts/_tiff_crs.py`](processingScripts/_tiff_crs.py) (gemeinsam für Script 1, Script 2_2 und GUI).
+
+Bei **DOPs** (Input ohne Tag ist erlaubt) prüft das GUI die Tags schon **vor dem Sicherheitscheck** (im Hintergrund über OSGeo4W-Python, nur lesend):
+
+| CRS-Tag im Input | Ergebnis |
+|---|---|
+| keiner (Koordinaten in LV95) | wird auf `EPSG:2056` gesetzt |
+| `EPSG:2056` | ok |
+| LV95 + LN02 (`EPSG:5728`) | Höhenbezug wird still entfernt |
+| LV95 + **LHN95** (`EPSG:5729`) oder anderer Höhenbezug | **Warnung** (Ja/Nein-Dialog, Vorauswahl Nein) – prüfen, ob nur der Tag falsch ist oder ob mit dem falschen Höhenbezug orthorektifiziert wurde (Lageversatz ≈ Höhenfehler × tan(Blickwinkel)). Ja = auf `EPSG:2056` setzen |
+| nicht LV95 (z.B. LV03) | Fehler-Dialog, Import startet nicht |
+
+DMC-DOPs aus dem `topo-DMCdataConverter` tragen bereits `EPSG:2056` (dort per `gdal.Translate(outputSRS="EPSG:2056")` gesetzt) – die Prüfung ist dort nur eine Absicherung.
 
 **Lokales Staging** *(Performance, Feld „Lokaler Temp-Ordner“)*
 Bei grossen Lieferungen über ein Netzlaufwerk kann ein lokaler Zwischenordner angegeben werden – reduziert die Anzahl Netzwerktransfers pro Tile deutlich.
@@ -220,7 +235,7 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 ## Wichtige Hinweise
 
 - **Line_IDs**: Die erste Line_ID bestimmt den Aufnahmezeitpunkt und muss die früheste Befliegung sein – die GUI sortiert automatisch (DMC-4 nach Linienstart). Bei `SB_DOP_16` ist nur eine Line_ID im Hauptfeld erlaubt, alle weiteren gehören ins Feld `allAreaLineIDs`.
-- **Zielpfad**: muss den GDS-Namen als vorletzten Ordner enthalten (z.B. `…\SB_DSM\2025_AREA_DSM`).
+- **Zielpfad**: muss den GDS-Namen als vorletzten Ordner enthalten (z.B. `…\SB_DSM\2025_AREA_DSM`), bei `SB_DOP` mit DMC-4 den Catalog-Namen `SB_DOP_DMC` (z.B. `…\SB_DOP_DMC\2026_GUPPENFIRN_DOP`). Sonst erscheint vor dem Import eine Warnung.
 - **Sicherheitscheck**: Vor dem Import müssen alle Kontrollfragen bestätigt werden (Pfade, Line_IDs, NoData-Werte vorgängig visuell prüfen).
 - **Nach dem Import**: Die Validierung im GDWH-Portal (CHECK) muss erfolgreich sein, bevor der eigentliche Import gestartet wird. STAC folgt danach automatisch.
 
@@ -240,6 +255,7 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 | `processingScripts/3_fix_false_nodata_dop.py` | Optionale NoData-Vorkorrektur (SB_DOP), läuft in-place vor Script 1 | ✓ (eigenständiges CLI, siehe Docstring) |
 | `processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py` | LAS-1.4-Vorkonversion (SB_DSM_PUNKTWOLKE), läuft immer automatisch vor Script 1, schreibt auf Arbeitskopie; Ziel PF6, bei DMC-4 PF7 mit Pflicht-RGB (CLI: `--keep-rgb`) | ✓ (eigenständiges CLI, siehe Docstring) |
 | `processingScripts/_line_ids.py` | LineID-Formate je CameraSystem (Prüfung, Sortierung, BandID, STAC-Datum), von GUI und Script 1 genutzt | – |
+| `processingScripts/_tiff_crs.py` | CRS-Tag im TIFF prüfen/setzen, von Script 1, Script 2_2 und der GUI-Vorprüfung (DOP, Aufruf nur lesend via OSGeo4W Python) genutzt | – |
 | `processingScripts/_osgeo_runner.py` | Interner Subprocess-Runner (OSGeo4W Python) | – |
 | `processingScripts/_tif_preview_reader.py` | Interner Subprocess-Helper: erzeugt die TIF-Vorschau im GUI | – |
 | `test/test_functions.py` | Unit-Tests für die Sub-Scripts in `processingScripts/` | ✓ |
