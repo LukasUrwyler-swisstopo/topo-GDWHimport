@@ -12,7 +12,7 @@ Ein GUI-Tool, das den kompletten Ablauf von der Datenvorbereitung bis zum STAC-I
 python pfad/GUI_GDWHimport.py
 ```
 
-<img width="1000" height="1400" alt="image" src="https://github.com/user-attachments/assets/94a84229-81f6-4514-99ee-1ad0c78f4058" />
+<img width="975" height="1061" alt="image" src="https://github.com/user-attachments/assets/134b1260-8565-4592-a1af-644043248e37" />
 
 
 Alle Angaben (GDS, Pfade, Meta-Informationen) werden direkt im GUI ausgefüllt – kein manuelles Bearbeiten der Scripts nötig.
