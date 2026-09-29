@@ -669,7 +669,8 @@ class SicherheitsCheckDialog(tk.Toplevel):
         else:
             nodata = meta.get("NoData", "")
         _kv(sec1, "Input NoData", nodata)
-        if gds == "SB_DOP":
+        # DMC-4: keine Vorkorrektur falscher NoData-Pixel (siehe _update_camera_nodata_rules)
+        if gds == "SB_DOP" and not is_dmc:
             _kv(sec1, "Falsche NoData-Pixel vorkorrigieren:",
                 "Ja" if meta.get("FixFalseNodata") else "Nein")
             fix_hint_row = tk.Frame(sec1, bg=T["root"])
@@ -729,19 +730,17 @@ class SicherheitsCheckDialog(tk.Toplevel):
                 "Vorgängig mit dem Button «check input-NoData» visuell kontrollieren.",
             ]
         elif gds == "SB_DOP":
-            nodata_frage = (
-                "Sind die NoData-Werte korrekt? (8BIT RGBN, 4-Band: schwarze "
-                "Background-Pixel = 0 0 0 0)   "
-                if is_dmc else
-                "Sind die NoData-Werte korrekt? (8BIT, 3-Band: schwarze "
-                "Background-Pixel = 0 0 0  /  weisse = 255 255 255)   ")
             check_questions = [
                 "Ist der Input Folder der korrekte Pfad zum DOP-Mosaik, "
                 "welches importiert werden soll?",
                 "Sind die Line_IDs korrekt?",
-                nodata_frage +
-                "Vorgängig mit dem Button «check input-NoData» visuell kontrollieren.",
             ]
+            # DMC-4: NoData fix '0 0 0 0' (im GUI nicht waehlbar) - keine Frage noetig
+            if not is_dmc:
+                check_questions.append(
+                    "Sind die NoData-Werte korrekt? (8BIT, 3-Band: schwarze "
+                    "Background-Pixel = 0 0 0  /  weisse = 255 255 255)   "
+                    "Vorgängig mit dem Button «check input-NoData» visuell kontrollieren.")
         else:
             check_questions = [
                 f"Ist der Inputpfad im korrekten Referenzsystem?   ({expected_crs})",
@@ -1245,6 +1244,46 @@ class GDWHApp(tk.Tk):
                                      font=("", 9), cursor="hand2", padx=10, pady=4)
         self._theme_btn.pack(side="right", padx=12)
 
+        # Umgebung (OSGeo4W Python + lokaler Staging-Ordner) - dezent ganz oben,
+        # einmal eingerichtet selten geaendert
+        self._osgeo_frame = ttk.Frame(self)
+        self._osgeo_frame.pack(fill="x", padx=12, pady=(6, 0))
+        osgeo_lbl_static = ttk.Label(self._osgeo_frame, text="OSGeo4W Python:", font=("", 8))
+        osgeo_lbl_static.pack(side="left")
+        self._dim_labels.append(osgeo_lbl_static)
+
+        self._osgeo_lbl = ttk.Label(self._osgeo_frame, font=("Courier New", 8),
+                                     text=self._osgeo_python or "(nicht gefunden)")
+        self._osgeo_lbl.pack(side="left", padx=(6, 0))
+
+        self._osgeo_status = ttk.Label(self._osgeo_frame, font=("", 8, "bold"))
+        self._osgeo_status.pack(side="left", padx=(6, 0))
+
+        ttk.Button(self._osgeo_frame, text="Ändern…", style="Small.TButton",
+                    command=self._set_osgeo_python).pack(side="right")
+        self._update_osgeo_label()
+
+        # Lokaler Staging-Ordner Zeile (Performance, siehe _osgeo_runner.py:
+        # Quelle/bestehendes Ziel werden dorthin gespiegelt, verarbeitet, dann
+        # zurueckkopiert - schnelleres Laufwerk als das Eingangs-/GDWH-
+        # Netzlaufwerk, z.B. Y:\ auf der VDI)
+        self._staging_frame = ttk.Frame(self)
+        self._staging_frame.pack(fill="x", padx=12, pady=(2, 0))
+        staging_lbl_static = ttk.Label(self._staging_frame, text="Lokaler Temp-Ordner (Staging):", font=("", 8))
+        staging_lbl_static.pack(side="left")
+        self._dim_labels.append(staging_lbl_static)
+
+        self._staging_lbl = ttk.Label(self._staging_frame, font=("Courier New", 8),
+                                       text=self._staging_dir or "(kein Staging – direkt übers Netzlaufwerk)")
+        self._staging_lbl.pack(side="left", padx=(6, 0))
+
+        self._staging_status = ttk.Label(self._staging_frame, font=("", 8, "bold"))
+        self._staging_status.pack(side="left", padx=(6, 0))
+
+        ttk.Button(self._staging_frame, text="Ändern…", style="Small.TButton",
+                    command=self._set_staging_dir).pack(side="right")
+        self._update_staging_label()
+
         # GDS-Auswahl
         gds_frame = ttk.LabelFrame(self, text="GDS auswählen", padding=8, style="Section.TLabelframe")
         gds_frame.pack(fill="x", padx=12, pady=(8, 0))
@@ -1273,45 +1312,6 @@ class GDWHApp(tk.Tk):
         self.camera_block_lbl.grid(row=1, column=1, sticky="w", padx=(8, 0))
         self.camera_block_lbl.grid_remove()
         self._hint_labels.append(self.camera_block_lbl)
-
-        # OSGeo4W Python Zeile
-        self._osgeo_frame = ttk.Frame(self)
-        self._osgeo_frame.pack(fill="x", padx=12, pady=(6, 0))
-        osgeo_lbl_static = ttk.Label(self._osgeo_frame, text="OSGeo4W Python:", font=("", 9))
-        osgeo_lbl_static.pack(side="left")
-        self._dim_labels.append(osgeo_lbl_static)
-
-        self._osgeo_lbl = ttk.Label(self._osgeo_frame, font=("Courier New", 8),
-                                     text=self._osgeo_python or "(nicht gefunden)")
-        self._osgeo_lbl.pack(side="left", padx=(6, 0))
-
-        self._osgeo_status = ttk.Label(self._osgeo_frame, font=("", 8, "bold"))
-        self._osgeo_status.pack(side="left", padx=(6, 0))
-
-        ttk.Button(self._osgeo_frame, text="Ändern…",
-                    command=self._set_osgeo_python).pack(side="right")
-        self._update_osgeo_label()
-
-        # Lokaler Staging-Ordner Zeile (Performance, siehe _osgeo_runner.py:
-        # Quelle/bestehendes Ziel werden dorthin gespiegelt, verarbeitet, dann
-        # zurueckkopiert - schnelleres Laufwerk als das Eingangs-/GDWH-
-        # Netzlaufwerk, z.B. Y:\ auf der VDI)
-        self._staging_frame = ttk.Frame(self)
-        self._staging_frame.pack(fill="x", padx=12, pady=(2, 0))
-        staging_lbl_static = ttk.Label(self._staging_frame, text="Lokaler Temp-Ordner (Staging):", font=("", 9))
-        staging_lbl_static.pack(side="left")
-        self._dim_labels.append(staging_lbl_static)
-
-        self._staging_lbl = ttk.Label(self._staging_frame, font=("Courier New", 8),
-                                       text=self._staging_dir or "(kein Staging – direkt übers Netzlaufwerk)")
-        self._staging_lbl.pack(side="left", padx=(6, 0))
-
-        self._staging_status = ttk.Label(self._staging_frame, font=("", 8, "bold"))
-        self._staging_status.pack(side="left", padx=(6, 0))
-
-        ttk.Button(self._staging_frame, text="Ändern…",
-                    command=self._set_staging_dir).pack(side="right")
-        self._update_staging_label()
 
         # Scrollbarer Formular-Bereich
         outer = ttk.Frame(self)
@@ -1678,6 +1678,8 @@ class GDWHApp(tk.Tk):
             foreground=[("active", T["fg"])],
             relief=[("pressed", "flat")],
         )
+        # Kompakter Button fuer die dezenten Umgebungs-Zeilen (erbt Farben/Map von TButton)
+        s.configure("Small.TButton", padding=(6, 0), font=("", 8))
         s.configure("TRadiobutton",
             background=T["panel"], foreground=T["fg"], focuscolor=T["panel"])
         s.map("TRadiobutton",
