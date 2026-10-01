@@ -1891,7 +1891,7 @@ class GDWHApp(tk.Tk):
             self.fix_nodata_cb.grid_remove()
             self.nodata_auto.config(
                 text="NoData wird automatisch gesetzt:\n"
-                     "  '_hillshade_' im Dateinamen  →  '255 255 255'\n"
+                     "  '_hillshade_' im Dateinamen  →  '255'  (Grauwerte → 0..225, JPEG-Reserve)\n"
                      "  '_DSM_'       im Dateinamen  →  '-3.4028235e+38'")
             self.nodata_auto.grid()
         elif gds == "SB_DSM_PUNKTWOLKE":

@@ -442,6 +442,100 @@ class TestTagMaskOnRaster(unittest.TestCase):
 
 
 # ============================================================
+#  rescale_hillshade_for_jpeg  (aus allGDS)
+#  Schreibbares Fake-Band inkl. Overviews; DataType = gemocktes GDT_Byte.
+# ============================================================
+class _FakeRWBand:
+    def __init__(self, array, overviews=(), data_type=None):
+        self.array = array.copy()
+        self.XSize, self.YSize = array.shape[1], array.shape[0]
+        self.DataType = allGDS.gdal.GDT_Byte if data_type is None else data_type
+        self._overviews = [_FakeRWBand(o) for o in overviews]
+        self.write_calls = 0
+
+    def ReadAsArray(self, xoff, yoff, xsize, ysize):
+        return self.array[yoff:yoff + ysize, xoff:xoff + xsize].copy()
+
+    def WriteArray(self, array, xoff=0, yoff=0):
+        self.write_calls += 1
+        self.array[yoff:yoff + array.shape[0], xoff:xoff + array.shape[1]] = array
+
+    def GetOverviewCount(self):
+        return len(self._overviews)
+
+    def GetOverview(self, i):
+        return self._overviews[i]
+
+
+class _FakeRWDataset:
+    def __init__(self, band):
+        self.RasterCount = 1
+        self.RasterYSize, self.RasterXSize = band.YSize, band.XSize
+        self.band = band
+
+    def GetRasterBand(self, i):
+        return self.band
+
+    def FlushCache(self):
+        pass
+
+
+class TestRescaleHillshadeForJpeg(unittest.TestCase):
+
+    S = allGDS.HILLSHADE_JPEG_SAFE_MAX
+
+    def _run(self, band, **kwargs):
+        ds = _FakeRWDataset(band)
+        with unittest.mock.patch.object(allGDS.gdal, "Open", return_value=ds):
+            return allGDS.rescale_hillshade_for_jpeg("dummy.tif", **kwargs)
+
+    def test_obergrenze_laesst_reserve_fuer_jpeg_und_cubic(self):
+        # Gemessen: JPEG Q95 +11 DN, kubische Overviews bis +14 DN darueber
+        self.assertLessEqual(self.S, 230)
+
+    def test_lineare_abbildung_nodata_bleibt(self):
+        arr = np.array([[0, 1, 127, 128], [240, 241, 254, 255]], dtype=np.uint8)
+        band = _FakeRWBand(arr)
+        self.assertTrue(self._run(band, safe_max=240))
+        self.assertEqual(band.array.tolist(), [[0, 1, 120, 121], [227, 228, 240, 255]])
+
+    def test_kein_gueltiges_pixel_ueber_obergrenze_nach_dem_lauf(self):
+        arr = np.arange(256, dtype=np.uint8).reshape(16, 16)
+        band = _FakeRWBand(arr)
+        self._run(band, chunk_rows=3)                        # mehrere Chunks
+        out = band.array
+        self.assertEqual(int(out[out != 255].max()), self.S)
+        self.assertEqual(int((out == 255).sum()), 1)         # nur das NoData-Pixel
+        # monoton: Reihenfolge der Grauwerte bleibt erhalten
+        self.assertTrue((np.diff(out.ravel()[:-1].astype(int)) >= 0).all())
+
+    def test_idempotent_zweiter_lauf_schreibt_nichts(self):
+        band = _FakeRWBand(np.array([[10, 200, 254, 255]], dtype=np.uint8))
+        self.assertTrue(self._run(band))
+        erster = band.array.copy()
+        band.write_calls = 0
+        self.assertFalse(self._run(band))
+        self.assertEqual(band.write_calls, 0)
+        self.assertTrue((band.array == erster).all())
+
+    def test_bereits_unter_obergrenze_bleibt_unveraendert(self):
+        band = _FakeRWBand(np.array([[0, 100, self.S, 255]], dtype=np.uint8))
+        self.assertFalse(self._run(band))
+        self.assertEqual(band.write_calls, 0)
+
+    def test_overviews_werden_mitgerechnet(self):
+        ov = np.array([[254, 255]], dtype=np.uint8)
+        band = _FakeRWBand(np.array([[254, 254, 255, 255]], dtype=np.uint8), overviews=[ov])
+        self.assertTrue(self._run(band))
+        self.assertEqual(band.GetOverview(0).array.tolist(), [[self.S, 255]])
+
+    def test_kein_byte_raster_wird_nicht_angefasst(self):
+        band = _FakeRWBand(np.array([[254.0, 255.0]], dtype=np.float32), data_type="Float32")
+        self.assertFalse(self._run(band))
+        self.assertEqual(band.write_calls, 0)
+
+
+# ============================================================
 #  create_xml: AreaOverride  (aus allGDS)
 #  Deckt die GUI-Erweiterung ab, mit der ein manuell im Feld "Area"
 #  korrigierter Wert die dateinamen-basierte Ableitung uebersteuert

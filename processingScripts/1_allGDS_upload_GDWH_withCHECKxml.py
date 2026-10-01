@@ -1,4 +1,4 @@
-print("\nVersion 2.7.3 (Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade, SB_DOP und SB_DOP_16 EPSG:2056 (DOP: Warnung bei Hoehenbezug ungleich LN02) | "
+print("\nVersion 2.7.4 (SB_DSM-Hillshade: gueltige Grauwerte vor dem GDWH-JPEG linear auf 0..225 gestaucht, damit JPEG kein Pixel auf NoData 255 hebt (Einzelpixel-NoData in STAC), siehe rescale_hillshade_for_jpeg | 2.7.3: Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade, SB_DOP und SB_DOP_16 EPSG:2056 (DOP: Warnung bei Hoehenbezug ungleich LN02) | "
       "2.6.1: SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
 
 import os
@@ -380,6 +380,73 @@ def fix_dsm_false_nodata(file_path, false_nodata_value=DSM_FALSE_NODATA_VALUE,
     finally:
         ds.FlushCache()
         ds = None
+
+
+# SB_DSM Hillshade: Obergrenze der gueltigen Grauwerte vor der COG-Ableitung im
+# GDWH. Diese komprimiert mit JPEG, und JPEG hebt helle Pixel um bis zu +11 DN an;
+# kubisch gerechnete Overviews (COG-Default) ueberschwingen zusaetzlich um bis zu
+# +14 DN. Landet ein gueltiges Pixel so auf 255, stellt STAC es ueber den
+# NoData-Wert 255 als Loch dar - die interne Maske ist korrekt, betroffen ist nur
+# der Wert. Gemessen (01.10.2026, GDAL-COG JPEG Q95):
+#   volle Aufloesung (9 Mpx): Obergrenze 254 -> 61'165 Pixel auf 255, 250 -> 3'821,
+#                             245 und tiefer -> 0
+#   Overviews CUBIC (30 Mpx): 240 -> 22 Pixel auf 255, 230 -> max 250, 225 -> max 244
+HILLSHADE_NODATA = 255
+HILLSHADE_JPEG_SAFE_MAX = 225
+
+
+def rescale_hillshade_for_jpeg(file_path, safe_max=HILLSHADE_JPEG_SAFE_MAX,
+                               nodata=HILLSHADE_NODATA, chunk_rows=1000):
+    """
+    Staucht die gueltigen Grauwerte eines 1-Band-Byte-Hillshade linear von
+    0..254 auf 0..safe_max; der NoData-Wert 255 bleibt unveraendert. Linear statt
+    Kappen, damit helle Flaechen (Gletscher, Ebenen) ihre Abstufung behalten.
+
+    Idempotent: liegt kein gueltiges Pixel ueber safe_max, wird nichts geschrieben
+    (wiederholter Lauf, bereits aufbereiteter Hillshade) - sonst wuerde jeder Lauf
+    weiter stauchen. Interne Overviews werden mit derselben Tabelle umgerechnet,
+    der COG-Treiber uebernaehme sie sonst mit den alten Werten.
+
+    Echte 255er-Pixel innerhalb der Daten (voll beleuchtet, fremde Hillshades)
+    sind von NoData nicht zu unterscheiden und bleiben NoData.
+
+    Gibt True zurueck, wenn umgerechnet wurde.
+    """
+    lut = np.round(np.arange(256) * safe_max / (nodata - 1)).astype(np.uint8)
+    lut[nodata] = nodata
+
+    ds = gdal.Open(file_path, gdal.GA_Update)
+    if ds is None:
+        raise FileNotFoundError(f"Konnte Raster nicht zum Schreiben oeffnen: {file_path}")
+    try:
+        band = ds.GetRasterBand(1)
+        if ds.RasterCount != 1 or band.DataType != gdal.GDT_Byte:
+            log(f"[WARNUNG] Hillshade '{os.path.basename(file_path)}' ist nicht 1-Band Byte "
+                f"- Grauwerte NICHT gestaucht, JPEG kann Einzelpixel auf {nodata} heben.")
+            return False
+
+        x_size, y_size = ds.RasterXSize, ds.RasterYSize
+        needs_rescale = False
+        for y_off in range(0, y_size, chunk_rows):
+            rows = min(chunk_rows, y_size - y_off)
+            arr = band.ReadAsArray(0, y_off, x_size, rows)
+            if ((arr > safe_max) & (arr != nodata)).any():
+                needs_rescale = True
+                break
+        if not needs_rescale:
+            return False
+
+        targets = [band] + [band.GetOverview(i) for i in range(band.GetOverviewCount())]
+        for b in targets:
+            bx, by = b.XSize, b.YSize
+            for y_off in range(0, by, chunk_rows):
+                rows = min(chunk_rows, by - y_off)
+                b.WriteArray(lut[b.ReadAsArray(0, y_off, bx, rows)], 0, y_off)
+        return True
+    finally:
+        ds.FlushCache()
+        ds = None
+
 
 def normalize_nodata_for_output(GDS, nodata_str):
     """
@@ -896,6 +963,12 @@ def _process_tile(fn, src, out, GDS, meta, cached_attrs):
             # noData-Darstellung (Vorfall 23.7.2026). Fuer Hillshade bleibt
             # die Maske wie gehabt bestehen.
             is_sb_dsm_raster = GDS == "SB_DSM" and "_hillshade_" not in fn.lower()
+            is_hillshade = GDS == "SB_DSM" and not is_sb_dsm_raster
+
+            if is_hillshade and rescale_hillshade_for_jpeg(fp):
+                log(f"  {fn}: Hillshade-Grauwerte 0..{HILLSHADE_NODATA - 1} -> "
+                    f"0..{HILLSHADE_JPEG_SAFE_MAX} gestaucht (Reserve fuer GDWH-JPEG, "
+                    f"sonst Einzelpixel-NoData {HILLSHADE_NODATA} in STAC).")
 
             if is_sb_dsm_raster:
                 # Historischer falscher NoData-Wert (siehe DSM_FALSE_NODATA_VALUE):
