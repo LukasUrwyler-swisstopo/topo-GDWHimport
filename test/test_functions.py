@@ -8,13 +8,17 @@ Ausfuehren (aus dem Projekt-Hauptverzeichnis):
 """
 
 import base64
+import contextlib
 import importlib.util
 import inspect
+import io
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
+import types
 import unittest
 import unittest.mock
 from unittest.mock import MagicMock
@@ -771,6 +775,171 @@ class TestCopyFilesFlat(unittest.TestCase):
         self.assertEqual(n_kopiert, 2)
         self.assertEqual(uebersprungen, ["cog_QC"])
         self.assertEqual(sorted(os.listdir(self.dst)), ["tile1.tfw", "tile1.tif"])
+
+
+# ============================================================
+#  _default_worker_count / _fix_false_nodata_one / _run_fix_false_nodata
+#  (aus _osgeo_runner.py) - parallele Vorkorrektur falscher NoData-Pixel.
+#  Script 3 (GDAL) wird durch ein Fake-Modul ersetzt: geprueft wird nur die
+#  Orchestrierung (jede Datei genau einmal, Ergebnis/Log unabhaengig von der
+#  Thread-Reihenfolge, Fail-fast bei Fehlern), nicht die Pixel-Korrektur.
+# ============================================================
+class TestDefaultWorkerCount(unittest.TestCase):
+
+    def _mit_cpu(self, n):
+        with unittest.mock.patch.object(osgeo_runner.os, "cpu_count", return_value=n):
+            return osgeo_runner._default_worker_count()
+
+    def test_reserviert_zwei_kerne(self):
+        self.assertEqual(self._mit_cpu(6), 4)
+
+    def test_maximal_acht(self):
+        self.assertEqual(self._mit_cpu(32), 8)
+
+    def test_mindestens_einer(self):
+        self.assertEqual(self._mit_cpu(1), 1)
+        self.assertEqual(self._mit_cpu(2), 1)
+
+    def test_cpu_count_unbekannt(self):
+        # os.cpu_count() kann None liefern -> Annahme 4 Kerne -> 2 Worker
+        self.assertEqual(self._mit_cpu(None), 2)
+
+
+def _tile_nr(fn):
+    return int(re.search(r"\d+", fn).group())
+
+
+def _fake_mod3(fehler_bei=None, verzoegerung=None):
+    """Ersetzt Script 3: zeichnet Aufrufe auf und liefert ein Ergebnis-Dict
+    wie process_tile_inplace. verzoegerung(fn) -> Sekunden, um die
+    Abschluss-Reihenfolge der Threads zu durchmischen."""
+    aufrufe = []
+
+    def process_tile_inplace(path, **kwargs):
+        fn = os.path.basename(path)
+        aufrufe.append((fn, kwargs))
+        if verzoegerung:
+            time.sleep(verzoegerung(fn))
+        if fn == fehler_bei:
+            raise RuntimeError(f"Testfehler in {fn}")
+        n = _tile_nr(fn)
+        return {"n_groups": 1, "n_increment_px": n, "n_shadow_px": 0,
+                "group_rows": [{"label_id": 1, "size_px": n,
+                                "border_contact_px": 0, "decision": "false"}]}
+
+    return types.SimpleNamespace(process_tile_inplace=process_tile_inplace), aufrufe
+
+
+class TestFixFalseNodataOne(unittest.TestCase):
+
+    def test_parameter_nodata_255(self):
+        mod3, aufrufe = _fake_mod3()
+        osgeo_runner._fix_false_nodata_one(mod3, os.path.join("x", "tile1.tif"), 255)
+        self.assertEqual(aufrufe[0][1], {
+            "nodata_value": 255, "strip_existing_mask": True,
+            "write_mask": True, "rewrite_real_nodata_to_zero": True})
+
+    def test_parameter_nodata_0(self):
+        mod3, aufrufe = _fake_mod3()
+        osgeo_runner._fix_false_nodata_one(mod3, os.path.join("x", "tile1.tif"), 0)
+        self.assertFalse(aufrufe[0][1]["rewrite_real_nodata_to_zero"])
+        self.assertEqual(aufrufe[0][1]["nodata_value"], 0)
+
+
+class TestRunFixFalseNodata(unittest.TestCase):
+
+    N_TILES = 12
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.tiles = [f"tile{i:02d}.tif" for i in range(1, self.N_TILES + 1)]
+        for fn in self.tiles + ["tile01.tfw", "files.csv"]:
+            with open(os.path.join(self.tmpdir, fn), "w", encoding="utf-8") as f:
+                f.write("x")
+        os.makedirs(os.path.join(self.tmpdir, "cog_QC"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run(self, mod3, workers, nodata="255"):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            osgeo_runner._run_fix_false_nodata(mod3, self.tmpdir, {"NoData": nodata},
+                                               workers=workers)
+        return buf.getvalue()
+
+    @staticmethod
+    def _detailzeilen(log):
+        # Fortschrittszeilen ("[3/12] verarbeitet") haengen von der Thread-
+        # Reihenfolge ab, die Detail- und Summenzeilen duerfen es nicht.
+        return [z for z in log.splitlines()
+                if z.startswith("  ") or z.startswith("Vorkorrektur abgeschlossen")]
+
+    def test_parallel_jede_tif_genau_einmal(self):
+        mod3, aufrufe = _fake_mod3()
+        self._run(mod3, workers=4)
+        self.assertEqual(sorted(fn for fn, _ in aufrufe), self.tiles)
+
+    def test_parallel_gleiches_log_wie_sequenziell(self):
+        # Spaete Tiles schneller fertig als fruehe -> Abschluss-Reihenfolge
+        # im Thread-Pool weicht von der sortierten ab.
+        verz = lambda fn: 0.002 * (self.N_TILES - _tile_nr(fn))
+        mod3_seq, _ = _fake_mod3()
+        mod3_par, _ = _fake_mod3(verzoegerung=verz)
+        log_seq = self._run(mod3_seq, workers=1)
+        log_par = self._run(mod3_par, workers=4)
+
+        self.assertIn("Parallelisierung: 4 gleichzeitige Worker", log_par)
+        self.assertNotIn("Parallelisierung", log_seq)
+        self.assertEqual(self._detailzeilen(log_par), self._detailzeilen(log_seq))
+        summe = sum(range(1, self.N_TILES + 1))
+        self.assertIn(f"{self.N_TILES} Datei(en), {summe} Pixel insgesamt korrigiert",
+                      log_par)
+
+    def test_fehler_wird_weitergeworfen_und_rest_nicht_mehr_eingeplant(self):
+        # Erstes Tile scheitert sofort, die uebrigen brauchen etwas Zeit:
+        # noch nicht gestartete Tiles muessen storniert werden.
+        mod3, aufrufe = _fake_mod3(
+            fehler_bei="tile01.tif",
+            verzoegerung=lambda fn: 0 if fn == "tile01.tif" else 0.05)
+        with self.assertRaises(RuntimeError):
+            self._run(mod3, workers=2)
+        self.assertLess(len(aufrufe), self.N_TILES)
+
+    def test_fehler_sequenziell_wird_weitergeworfen(self):
+        mod3, aufrufe = _fake_mod3(fehler_bei="tile03.tif")
+        with self.assertRaises(RuntimeError):
+            self._run(mod3, workers=1)
+        self.assertEqual([fn for fn, _ in aufrufe],
+                         ["tile01.tif", "tile02.tif", "tile03.tif"])
+
+    def test_ohne_nodata_wert_uebersprungen(self):
+        mod3, aufrufe = _fake_mod3()
+        log = self._run(mod3, workers=4, nodata="")
+        self.assertEqual(aufrufe, [])
+        self.assertIn("kein NoData-Wert gesetzt", log)
+
+    def test_ohne_tif_uebersprungen(self):
+        for fn in self.tiles:
+            os.remove(os.path.join(self.tmpdir, fn))
+        mod3, aufrufe = _fake_mod3()
+        log = self._run(mod3, workers=4)
+        self.assertEqual(aufrufe, [])
+        self.assertIn("keine .tif Dateien", log)
+
+    def test_worker_auf_dateianzahl_begrenzt(self):
+        for fn in self.tiles[2:]:
+            os.remove(os.path.join(self.tmpdir, fn))
+        mod3, aufrufe = _fake_mod3()
+        log = self._run(mod3, workers=8)
+        self.assertIn("Parallelisierung: 2 gleichzeitige Worker", log)
+        self.assertEqual(len(aufrufe), 2)
+
+    def test_nodata_dezimal_aus_gui(self):
+        # GUI liefert den Wert evtl. als "255.0" bzw. mit Zusatztext
+        mod3, aufrufe = _fake_mod3()
+        self._run(mod3, workers=1, nodata="255.0 (weiss)")
+        self.assertTrue(all(kw["nodata_value"] == 255 for _, kw in aufrufe))
 
 
 # ============================================================

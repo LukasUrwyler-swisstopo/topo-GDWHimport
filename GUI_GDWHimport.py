@@ -8,7 +8,7 @@ Steuert die Sub-Scripts 1, 2_1 und 2_2 je nach gewähltem GDS.
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import sys, os, re, threading, importlib.util, io, queue, builtins, traceback
-import subprocess, json, tempfile, ctypes, webbrowser
+import subprocess, json, tempfile, ctypes, webbrowser, time
 from datetime import datetime
 
 # ─── Sub-Script Pfade ─────────────────────────────────────────────────────────
@@ -24,6 +24,8 @@ RUNNER_SCRIPT = os.path.join(PROCESSING_DIR, "_osgeo_runner.py")
 SCRIPT_PREVIEW = os.path.join(PROCESSING_DIR, "_tif_preview_reader.py")
 SCRIPT_TIFF_CRS = os.path.join(PROCESSING_DIR, "_tiff_crs.py")
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config", "_gdwh_config.json")
+# Max. Alter (s) eines zwischengespeicherten Ordner-Pruefresultats, siehe _quelle_isdir
+DIR_CHECK_MAX_AGE = 2.0
 
 # LineID-Formate je CameraSystem - gemeinsames Modul mit Script 1 (nur Standardbibliothek)
 if PROCESSING_DIR not in sys.path:
@@ -1215,6 +1217,8 @@ class GDWHApp(tk.Tk):
         self._pending_ziel     = None
         self._error_lines     = []
         self._log_visible     = False
+        self._dir_cache       = {}      # Pfad -> (isdir, Zeitpunkt), siehe _quelle_isdir
+        self._dir_checking    = set()   # Pfade mit laufender Hintergrund-Pruefung
         self.gds_var        = tk.StringVar(value="SB_DOP")
         self._dim_labels    = []   # Labels mit fg_dim (grau)
         self._accent_labels = []   # Labels mit accent (blau)
@@ -2472,7 +2476,7 @@ class GDWHApp(tk.Tk):
         ziel   = self.ziel_var.get().strip().strip('"')
         area   = self.area_var.get().strip()
 
-        ok = (bool(quelle) and os.path.isdir(quelle)
+        ok = (bool(quelle) and self._quelle_isdir(quelle)
               and bool(ziel)
               and bool(area) and not area.startswith("—")
               and bool(self.terrain_var.get().strip())
@@ -2493,6 +2497,35 @@ class GDWHApp(tk.Tk):
             fg=color, disabledforeground=color,
             bg=T["btn"], activebackground=T["btn_hover"],
         )
+
+    def _quelle_isdir(self, path):
+        """Nicht-blockierende Ordnerpruefung fuer den 120-ms-Poll-Zyklus.
+
+        os.path.isdir() auf dem Netzlaufwerk kann (v.a. direkt nach einem grossen
+        Transfer ins Bucket) sekundenlang haengen und frierte so den GUI-Thread
+        ein ("Not Responding"). Die Pruefung laeuft deshalb im Hintergrund-Thread;
+        hier wird nur das zwischengespeicherte Resultat gelesen (bis zum ersten
+        Resultat: False). Nach DIR_CHECK_MAX_AGE s wird neu geprueft, damit ein
+        nachtraeglich angelegter/entfernter Ordner weiterhin erkannt wird."""
+        cached = self._dir_cache.get(path)
+        stale  = cached is None or time.monotonic() - cached[1] > DIR_CHECK_MAX_AGE
+        if stale and path not in self._dir_checking:
+            # Beim Tippen entsteht pro Zeichen ein Eintrag - Cache klein halten
+            if len(self._dir_cache) > 50:
+                self._dir_cache = {path: cached} if cached else {}
+            self._dir_checking.add(path)
+            threading.Thread(target=self._dir_check_worker,
+                             args=(path,), daemon=True).start()
+        return cached[0] if cached else False
+
+    def _dir_check_worker(self, path):
+        # Nur dict/set-Zuweisungen (unter dem GIL atomar), keine Tk-Aufrufe
+        try:
+            result = os.path.isdir(path)
+        except Exception:
+            result = False
+        self._dir_cache[path] = (result, time.monotonic())
+        self._dir_checking.discard(path)
 
     def _on_done(self, success):
         self._running = False
