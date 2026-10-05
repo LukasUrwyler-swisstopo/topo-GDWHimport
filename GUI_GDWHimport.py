@@ -694,6 +694,8 @@ class SicherheitsCheckDialog(tk.Toplevel):
                      font=("Segoe UI", 8, "italic"),
                      bg=T["root"], fg=T["fg_dim"], anchor="nw",
                      wraplength=560, justify="left").pack(anchor="w")
+        if meta.get("ForceCrsLV95"):
+            _kv(sec1, "CRS-Tag:", "fremdes CRS → wird auf EPSG:2056 gesetzt")
         _kv(sec1, "TerrainModel:", meta.get("TerrainModel", ""))
         _kv(sec1, "SourceRefSys:", meta.get("SourceReferenceSystem", ""))
         if gds == "SB_DSM":
@@ -2924,15 +2926,37 @@ class GDWHApp(tk.Tk):
             return
 
         errors, warns = result.get("error", []), result.get("warn", [])
+        retag = result.get("retag", [])
         n_set = len(result.get("set", []))
         if errors:
-            for fn, msg in errors:
+            # Harte Fehler (z.B. Koordinaten ausserhalb LV95) - kein Umtaggen anbieten
+            for fn, msg in errors + retag:
                 self._log(f"[FEHLER] CRS: {fn}: {msg}\n")
             messagebox.showerror("CRS-Vorprüfung",
                 f"{len(errors)} DOP-Kachel(n) haben ein CRS, das nicht zu LV95 (EPSG:2056) "
                 f"passt - der Import würde abbrechen:\n\n{self._file_list(errors)}\n\n"
                 "Bitte die Daten prüfen. Es wurde nichts verändert.", parent=self)
             return
+
+        if retag:
+            # Fremdes/unbekanntes CRS, Koordinaten aber in LV95 - nur der Tag ist falsch
+            for fn, msg in retag:
+                note(f"[WARNUNG] CRS: {fn}: {msg}\n")
+            if not messagebox.askyesno("CRS-Vorprüfung – fremdes CRS",
+                    f"{len(retag)} DOP-Kachel(n) haben ein CRS, das nicht zu LV95 (EPSG:2056) "
+                    f"passt:\n\n{self._file_list(retag)}\n\n"
+                    "Die Koordinaten aller betroffenen Kacheln liegen in der LV95-Ausdehnung "
+                    "- vermutlich ist nur der CRS-Tag falsch oder unvollständig. Beim Umtaggen "
+                    "werden nur die GeoKeys überschrieben, Pixel und Geotransformation bleiben "
+                    "unverändert.\n\n"
+                    "Ja = trotzdem starten und CRS auf EPSG:2056 taggen\n"
+                    "Nein = Import abbrechen, nichts wird verändert",
+                    icon="warning", default="no", parent=self):
+                return
+            meta = args[1]
+            meta["ForceCrsLV95"] = True  # Schluessel siehe _tiff_crs.FORCE_LV95_KEY
+            note(f"CRS-Vorprüfung: fremdes CRS bei {len(retag)} Kachel(n) bestätigt "
+                 f"- Tags werden auf EPSG:2056 gesetzt.\n")
 
         if warns:
             for fn, msg in warns:
@@ -2952,8 +2976,9 @@ class GDWHApp(tk.Tk):
             note(f"CRS-Vorprüfung: Höhenbezug-Warnung für {len(warns)} Kachel(n) "
                  f"bestätigt - Tags werden auf EPSG:2056 gesetzt.\n")
         n_all = len(result.get("targets", {}))
-        note(f"CRS-Vorprüfung: {n_all} TIFF geprüft, {n_all - n_set - len(warns)} "
-             f"korrekt, {n_set + len(warns)} werden beim Import auf EPSG:2056 gesetzt.\n")
+        n_fix = n_set + len(warns) + len(retag)
+        note(f"CRS-Vorprüfung: {n_all} TIFF geprüft, {n_all - n_fix} "
+             f"korrekt, {n_fix} werden beim Import auf EPSG:2056 gesetzt.\n")
         self._start_import_confirmed(*args)
 
     # ── Import-Thread ─────────────────────────────────────────────────────────

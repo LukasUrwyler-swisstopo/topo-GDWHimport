@@ -58,6 +58,7 @@ Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 3. Quell- und Zielpfad eingeben
 4. Meta-Informationen eingeben  (Dropdowns / Freitext)
 5. (nur SB_DOP / SB_DOP_16) CRS-Vorprüfung der TIFF, Dialog bei falschem Höhenbezug
+   bzw. bei fremdem CRS mit LV95-Koordinaten (Option: auf EPSG:2056 umtaggen)
 6. Sicherheitscheck bestätigen  (Kontrollfragen)
 7. Import starten
    → (nur SB_DSM_PUNKTWOLKE: LAS-1.4-Vorkonversion, automatisch)

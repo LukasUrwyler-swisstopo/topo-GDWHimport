@@ -22,6 +22,12 @@ DOP mit Hoehenbezug im Tag:
   v.a. in steilem Gelaende und am Bildrand). Bestaetigung im GUI vor dem Start,
   im Script per input() (im GUI-Lauf automatisch 'Y').
 
+DOP mit fremdem/unbekanntem horizontalem CRS (z.B. 'unnamed'), Koordinaten aber
+  in der LV95-Ausdehnung ('retag'): standardmaessig Abbruch wie 'error'. Nur wenn
+  im GUI bestaetigt (meta_info[FORCE_LV95_KEY]), wird der Tag auf EPSG:2056
+  ueberschrieben - Pixel und Geotransformation bleiben unveraendert. Liegen die
+  Koordinaten ausserhalb (z.B. LV03), bleibt es ein harter Fehler.
+
 Aufruf (GUI-Vorpruefung, nur lesend):
     <osgeo_python> _tiff_crs.py <config.json>
     config.json: {"gds": "...", "meta_info": {...}, "files": ["<voller Pfad>", ...]}
@@ -41,6 +47,8 @@ CRS_LV95      = "EPSG:2056"
 CRS_LV95_LN02 = "EPSG:2056+5728"
 VERTICAL_LN02 = "5728"
 DOP_GDS       = ("SB_DOP", "SB_DOP_16")
+# meta_info-Flag aus dem GUI: 'retag'-Kacheln auf EPSG:2056 umtaggen
+FORCE_LV95_KEY = "ForceCrsLV95"
 
 # Grobe LV95-Ausdehnung (CH/FL, grosszuegig gepuffert) - nur fuer Kacheln OHNE
 # CRS-Tag: LV03-Koordinaten (6-stellig) fallen klar heraus.
@@ -140,6 +148,15 @@ def vertical_warning(GDS, info):
     return f"Hoehenbezug '{info.get('name', '')}' (EPSG:{vertical or 'unbekannt'})"
 
 
+def retag_allowed(GDS, info):
+    """True, wenn ein DOP-TIFF ein fremdes/unbekanntes horizontales CRS traegt, die
+    Koordinaten aber in der LV95-Ausdehnung liegen: dann ist nur der Tag falsch
+    (in diesem Wertebereich kommt praktisch nur LV95 in Frage) und darf nach
+    Bestaetigung ueberschrieben werden."""
+    return (GDS in DOP_GDS and info.get("has_crs") and not info.get("horizontal_is_lv95")
+            and bool(info.get("in_lv95_extent")))
+
+
 def _check_one(path, GDS, meta_info):
     fn = os.path.basename(path)
     target = tiff_crs_target(GDS, meta_info, fn)
@@ -147,8 +164,13 @@ def _check_one(path, GDS, meta_info):
         return fn, None, None, None
     try:
         info = read_crs_info(path)
+    except Exception as e:
+        return fn, target, "error", str(e)
+    try:
         action = decide_crs_action(info, target)
     except Exception as e:
+        if retag_allowed(GDS, info):
+            return fn, target, "retag", f"{e}, Koordinaten in LV95"
         return fn, target, "error", str(e)
     warning = vertical_warning(GDS, info)
     return fn, target, ("warn" if warning else action), warning
@@ -156,10 +178,11 @@ def _check_one(path, GDS, meta_info):
 
 def check_files(GDS, meta_info, paths, workers=CHECK_WORKERS):
     """Prueft die CRS-Tags aller TIFF in paths (nur lesend). Ergebnis:
-    {"ok": [fn], "set": [fn], "warn": [[fn, meldung]], "error": [[fn, meldung]],
-     "targets": {fn: soll}} - 'warn'-Dateien werden beim Setzen wie 'set' behandelt."""
+    {"ok": [fn], "set": [fn], "warn": [[fn, meldung]], "retag": [[fn, meldung]],
+     "error": [[fn, meldung]], "targets": {fn: soll}} - 'warn'-Dateien werden beim
+    Setzen wie 'set' behandelt, 'retag'-Dateien nur mit FORCE_LV95_KEY."""
     paths = [p for p in paths if p.lower().endswith(('.tif', '.tiff'))]
-    result = {"ok": [], "set": [], "warn": [], "error": [], "targets": {}}
+    result = {"ok": [], "set": [], "warn": [], "retag": [], "error": [], "targets": {}}
     if not paths:
         return result
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(paths)))) as executor:
@@ -168,8 +191,8 @@ def check_files(GDS, meta_info, paths, workers=CHECK_WORKERS):
         if not target:
             continue
         result["targets"][fn] = target
-        if action in ("warn", "error"):
-            result[action].append([fn, f"{message} (Soll {target})" if action == "error" else message])
+        if action in ("warn", "retag", "error"):
+            result[action].append([fn, message if action == "warn" else f"{message} (Soll {target})"])
         else:
             result[action].append(fn)
     return result
@@ -201,6 +224,8 @@ def ensure_tiff_crs(src, files, GDS, meta_info, log=print):
     (siehe tiff_crs_target). Widerspricht auch nur eine Kachel dem Soll, bricht
     der Lauf ab, BEVOR eine Datei veraendert wurde. DOP mit falschem Hoehenbezug
     (vertical_warning): Warnung und Rueckfrage, bei 'Y' wird auf EPSG:2056 gesetzt.
+    DOP mit fremdem CRS in LV95-Ausdehnung (retag_allowed): nur mit
+    meta_info[FORCE_LV95_KEY] (GUI-Bestaetigung) umgetaggt, sonst Abbruch.
 
     SB_DSM: laesst sich LN02 nicht ins TIFF schreiben (GDAL ohne GeoTIFF 1.1),
     nur Warnung - der Hoehenbezug steht auch im XML und in der STAC-Beschreibung.
@@ -210,11 +235,19 @@ def ensure_tiff_crs(src, files, GDS, meta_info, log=print):
     if not targets:
         return
 
-    if res["error"]:
+    force = bool(meta_info.get(FORCE_LV95_KEY))
+    errors = res["error"] + ([] if force else res["retag"])
+    if errors:
         log("[FEHLER] CRS-Pruefung - Daten pruefen, es wurde nichts veraendert:")
-        for fn, msg in res["error"]:
+        for fn, msg in errors:
             log(f"   - {fn}: {msg}")
         sys.exit(1)
+
+    if res["retag"]:
+        log(f"[WARNUNG] {len(res['retag'])} DOP-Datei(en) mit fremdem CRS-Tag, Koordinaten "
+            f"in LV95 - im GUI bestaetigt, Tag wird auf {CRS_LV95} ueberschrieben:")
+        for fn, msg in res["retag"]:
+            log(f"   - {fn}: {msg}")
 
     if res["warn"]:
         log(f"[WARNUNG] {len(res['warn'])} DOP-Datei(en) mit falschem Hoehenbezug im CRS-Tag "
@@ -228,7 +261,7 @@ def ensure_tiff_crs(src, files, GDS, meta_info, log=print):
             sys.exit(1)
         log(f"Bestaetigt - Tags werden auf {CRS_LV95} gesetzt.")
 
-    to_set = res["set"] + [fn for fn, _ in res["warn"]]
+    to_set = res["set"] + [fn for fn, _ in res["warn"] + res["retag"]]
     not_persisted = [fn for fn in to_set if not set_raster_crs(os.path.join(src, fn), targets[fn])]
     for target in sorted(set(targets.values())):
         group = [fn for fn in targets if targets[fn] == target]
