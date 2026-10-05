@@ -128,9 +128,17 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
             if result.get("n_shadow_px") else ""
         )
         print(f"  {fn}: {result['n_groups']} Gruppe(n), {result['n_increment_px']} Pixel korrigiert{shadow_info}", flush=True)
+        # Nur Gruppen ab Stufe A (Groesse) ausgeben - kleine Gruppen sind
+        # ohnehin "falsch", bei Gletscher-/Schneekacheln sonst zehntausende
+        # Logzeilen pro Tile.
         for g in result["group_rows"]:
+            if g["border_contact_px"] is None:
+                continue
+            form = ""
+            if g.get("hole_ratio") is not None:
+                form = f", Einschluesse={g['hole_ratio']:.4f}, Rauheit={g['roughness']:.2f}"
             print(f"    Gruppe {g['label_id']}: {g['size_px']} px, "
-                  f"Randkontakt={g['border_contact_px']}, "
+                  f"Randkontakt={g['border_contact_px']}{form}, "
                   f"decision={g['decision']}", flush=True)
 
     print(f"Vorkorrektur abgeschlossen: {len(tif_files)} Datei(en), {n_px_total} Pixel insgesamt korrigiert.\n", flush=True)

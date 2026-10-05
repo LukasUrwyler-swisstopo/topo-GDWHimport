@@ -981,25 +981,18 @@ class TestWriteBandChunked(unittest.TestCase):
 
 # ============================================================
 #  classify_mask  (aus Script 3, 3_fix_false_nodata_dop.py)
-#  Kernlogik der Echt/Falsch-NoData-Klassifikation (Stufen A-E). Deckt
+#  Kernlogik der Echt/Falsch-NoData-Klassifikation (Stufen A-D). Deckt
 #  insbesondere den Produktionsvorfall vom 05.08.2026 (WALLIS_SAASTAL) ab:
-#  Stufe D/E muessen standardmaessig deaktiviert bleiben, siehe README
-#  "Vorkorrektur falscher NoData-Pixel (SB_DOP, optional)".
+#  eine grosse, kompakte echte NoData-Flaeche muss "echt" bleiben.
 # ============================================================
 @unittest.skipIf(fixnodata is None, f"3_fix_false_nodata_dop.py nicht importierbar: {_FIXNODATA_IMPORT_ERROR}")
 class TestClassifyMask(unittest.TestCase):
-
-    def _flat_bands(self, size_y, size_x, fill_value, dtype=np.uint8):
-        return [np.full((size_y, size_x), fill_value, dtype=dtype) for _ in range(3)]
 
     # -- Stufe A: Groesse --
     def test_stufe_a_kleine_gruppe_ist_falsch(self):
         mask = np.zeros((50, 50), dtype=bool)
         mask[0:5, 0:5] = True  # 25 px, weit unter Threshold, beruehrt sogar den Rand
-        bands = self._flat_bands(50, 50, 100)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(mask, bands, 0, threshold=1000)
+        inc, logs = fixnodata.classify_mask(mask, threshold=1000)
         self.assertEqual(logs[0]["decision"], "false_nodata")
         self.assertTrue(inc[mask].all())
 
@@ -1007,10 +1000,7 @@ class TestClassifyMask(unittest.TestCase):
         size = 300
         mask = np.zeros((size, size), dtype=bool)
         mask[0, 0:100] = True  # exakt 100 px, volle Randzeile
-        bands = self._flat_bands(size, size, 100)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(mask, bands, 0, threshold=100, min_border_contact=100)
+        inc, logs = fixnodata.classify_mask(mask, threshold=100, min_border_contact=100)
         self.assertEqual(logs[0]["size_px"], 100)
         self.assertEqual(logs[0]["decision"], "real_nodata")
 
@@ -1018,20 +1008,14 @@ class TestClassifyMask(unittest.TestCase):
         size = 300
         mask = np.zeros((size, size), dtype=bool)
         mask[0, 0:99] = True  # 99 px, knapp unter Threshold 100
-        bands = self._flat_bands(size, size, 100)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(mask, bands, 0, threshold=100, min_border_contact=100)
+        inc, logs = fixnodata.classify_mask(mask, threshold=100, min_border_contact=100)
         self.assertEqual(logs[0]["decision"], "false_nodata")
 
     # -- Stufe B: ueberhaupt Randkontakt --
     def test_stufe_b_grosse_gruppe_mitten_im_tile_ist_falsch(self):
         mask = np.zeros((100, 100), dtype=bool)
         mask[40:60, 40:60] = True  # 400 px, beruehrt keinen Rand
-        bands = self._flat_bands(100, 100, 100)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(mask, bands, 0, threshold=100, min_border_contact=10)
+        inc, logs = fixnodata.classify_mask(mask, threshold=100, min_border_contact=10)
         self.assertEqual(logs[0]["decision"], "false_nodata")
         self.assertFalse(logs[0]["touches_border"])
 
@@ -1042,10 +1026,7 @@ class TestClassifyMask(unittest.TestCase):
         for y in range(230, size):
             half_w = max(2, (size - 1 - y) // 3)
             mask[y, 150 - half_w:150 + half_w] = True
-        bands = self._flat_bands(size, size, 120)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(mask, bands, 0, threshold=1000, min_border_contact=100)
+        inc, logs = fixnodata.classify_mask(mask, threshold=1000, min_border_contact=100)
         self.assertEqual(logs[0]["decision"], "false_nodata")
         self.assertTrue(logs[0]["touches_border"])
         self.assertLess(logs[0]["border_contact_px"], 100)
@@ -1054,10 +1035,7 @@ class TestClassifyMask(unittest.TestCase):
         size = 300
         mask = np.zeros((size, size), dtype=bool)
         mask[280:300, 0:250] = True  # lange Kontaktzone am unteren Rand
-        bands = self._flat_bands(size, size, 120)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(mask, bands, 0, threshold=1000, min_border_contact=100)
+        inc, logs = fixnodata.classify_mask(mask, threshold=1000, min_border_contact=100)
         self.assertEqual(logs[0]["decision"], "real_nodata")
 
     def test_stufe_c_ecke_zaehlt_beide_kanten_zusammen(self):
@@ -1065,131 +1043,35 @@ class TestClassifyMask(unittest.TestCase):
         mask = np.zeros((size, size), dtype=bool)
         for i in range(60):
             mask[0:60 - i, i] = True  # Dreieck oben links, beruehrt 2 Kanten je kurz
-        bands = self._flat_bands(size, size, 120)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(mask, bands, 0, threshold=1000, min_border_contact=50)
+        inc, logs = fixnodata.classify_mask(mask, threshold=1000, min_border_contact=50)
         self.assertEqual(logs[0]["decision"], "real_nodata")
 
     # -- Regressionstest Vorfall WALLIS_SAASTAL (05.08.2026) --
     def test_regression_weicher_uebergang_bleibt_echt_per_default(self):
         """
-        Stufe D/E sind seit diesem Vorfall standardmaessig deaktiviert:
-        eine riesige, echte NoData-Flaeche mit weichem (gefeathertem)
-        inneren Uebergang wurde faelschlich als 'falsch' erkannt und
+        Eine riesige, echte NoData-Flaeche mit weichem (gefeathertem)
+        inneren Uebergang wurde damals faelschlich als 'falsch' erkannt und
         angehoben statt maskiert. Dieser Test stellt sicher, dass eine
-        solche Flaeche mit den Standard-Parametern 'echt' bleibt.
+        kompakte Flaeche mit den Standard-Parametern 'echt' bleibt.
         """
         size = 300
         mask = np.zeros((size, size), dtype=bool)
         mask[:, 0:150] = True
-        bands = self._flat_bands(size, size, 120)
-        for b in bands:
-            b[mask] = 0
-            b[:, 150] = 5  # weicher/gefeatherter Uebergang, nahe 0
-        inc, logs = fixnodata.classify_mask(mask, bands, 0, threshold=1000, min_border_contact=100)
+        inc, logs = fixnodata.classify_mask(mask, threshold=1000, min_border_contact=100)
         self.assertEqual(logs[0]["decision"], "real_nodata")
         self.assertFalse(inc[mask].any())
-
-    def test_stufe_d_erkennt_weichen_uebergang_wenn_explizit_aktiviert(self):
-        size = 300
-        mask = np.zeros((size, size), dtype=bool)
-        mask[:, 0:150] = True
-        bands = self._flat_bands(size, size, 120)
-        for b in bands:
-            b[mask] = 0
-            b[:, 150] = 5
-        inc, logs = fixnodata.classify_mask(
-            mask, bands, 0, threshold=1000, min_border_contact=100,
-            enable_gradient_check=True)
-        self.assertEqual(logs[0]["decision"], "false_nodata")
-
-    def test_stufe_d_harter_schnitt_bleibt_echt_wenn_aktiviert(self):
-        size = 300
-        mask = np.zeros((size, size), dtype=bool)
-        mask[:, 0:150] = True
-        bands = self._flat_bands(size, size, 120)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(
-            mask, bands, 0, threshold=1000, min_border_contact=100,
-            enable_gradient_check=True)
-        self.assertEqual(logs[0]["decision"], "real_nodata")
-
-    # -- Automatische Gradient-Toleranz (nur bei enable_gradient_check) --
-    def test_gradient_toleranz_automatik_weiss_grenzwert(self):
-        size = 300
-        for nachbarwert, erwartet in ((220, "false_nodata"), (219, "real_nodata")):
-            mask = np.zeros((size, size), dtype=bool)
-            mask[:, 0:150] = True
-            bands = self._flat_bands(size, size, 120)
-            for b in bands:
-                b[mask] = 255
-                b[:, 150] = nachbarwert
-            inc, logs = fixnodata.classify_mask(
-                mask, bands, 255, threshold=1000, min_border_contact=100,
-                enable_gradient_check=True)
-            self.assertEqual(logs[0]["decision"], erwartet,
-                              f"nodata=255, Nachbarwert={nachbarwert}")
-
-    def test_gradient_toleranz_automatik_schwarz_grenzwert(self):
-        size = 300
-        for nachbarwert, erwartet in ((20, "false_nodata"), (21, "real_nodata")):
-            mask = np.zeros((size, size), dtype=bool)
-            mask[:, 0:150] = True
-            bands = self._flat_bands(size, size, 120)
-            for b in bands:
-                b[mask] = 0
-                b[:, 150] = nachbarwert
-            inc, logs = fixnodata.classify_mask(
-                mask, bands, 0, threshold=1000, min_border_contact=100,
-                enable_gradient_check=True)
-            self.assertEqual(logs[0]["decision"], erwartet,
-                              f"nodata=0, Nachbarwert={nachbarwert}")
-
-    # -- Stufe E: Bounding-Box-Fuellgrad (nur bei enable_fill_ratio_check) --
-    def test_stufe_e_kompakter_block_bleibt_echt(self):
-        size = 300
-        mask = np.zeros((size, size), dtype=bool)
-        mask[:, 0:150] = True
-        bands = self._flat_bands(size, size, 120)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(
-            mask, bands, 0, threshold=1000, min_border_contact=100,
-            enable_gradient_check=True, enable_fill_ratio_check=True)
-        self.assertEqual(logs[0]["decision"], "real_nodata")
-
-    def test_stufe_e_duenne_verzweigte_form_ist_falsch(self):
-        size = 300
-        mask = np.zeros((size, size), dtype=bool)
-        mask[:, 0:5] = True
-        for y in range(0, size, 25):
-            mask[y:y + 1, 5:250] = True
-        bands = self._flat_bands(size, size, 120)
-        for b in bands:
-            b[mask] = 0
-        inc, logs = fixnodata.classify_mask(
-            mask, bands, 0, threshold=1000, min_border_contact=100,
-            enable_gradient_check=True, enable_fill_ratio_check=True)
-        self.assertEqual(logs[0]["decision"], "false_nodata")
 
     # -- Randfaelle --
     def test_keine_nodata_pixel_liefert_leere_liste(self):
         mask = np.zeros((50, 50), dtype=bool)
-        bands = self._flat_bands(50, 50, 100)
-        inc, logs = fixnodata.classify_mask(mask, bands, 0)
+        inc, logs = fixnodata.classify_mask(mask)
         self.assertEqual(logs, [])
         self.assertFalse(inc.any())
 
     def test_gesamtes_tile_ist_nodata_bleibt_echt(self):
-        # Kein innerer Rand vorhanden (Gruppe = ganzes Tile) -> Stufe D kann
-        # nicht widerlegen, muss "echt" bleiben.
+        # Gruppe = ganzes Tile -> keine Einschluesse, Rauheit 1.0 -> "echt".
         mask = np.ones((50, 50), dtype=bool)
-        bands = self._flat_bands(50, 50, 0)
-        inc, logs = fixnodata.classify_mask(
-            mask, bands, 0, threshold=100, min_border_contact=10,
-            enable_gradient_check=True, enable_fill_ratio_check=True)
+        inc, logs = fixnodata.classify_mask(mask, threshold=100, min_border_contact=10)
         self.assertEqual(logs[0]["decision"], "real_nodata")
 
 
@@ -1202,11 +1084,6 @@ class TestClassifyMask(unittest.TestCase):
 @unittest.skipIf(fixnodata is None, f"3_fix_false_nodata_dop.py nicht importierbar: {_FIXNODATA_IMPORT_ERROR}")
 class TestFixNodataSicherheitsDefaults(unittest.TestCase):
 
-    def test_classify_mask_stufe_d_e_defaults_aus(self):
-        sig = inspect.signature(fixnodata.classify_mask)
-        self.assertFalse(sig.parameters["enable_gradient_check"].default)
-        self.assertFalse(sig.parameters["enable_fill_ratio_check"].default)
-
     def test_process_tile_defaults(self):
         sig = inspect.signature(fixnodata.process_tile)
         # threshold=None -> wird pro Tile aus der GSD berechnet (900 m²,
@@ -1214,9 +1091,10 @@ class TestFixNodataSicherheitsDefaults(unittest.TestCase):
         self.assertIsNone(sig.parameters["threshold"].default)
         self.assertEqual(fixnodata.DEFAULT_MIN_NODATA_AREA_M2, 900.0)
         self.assertNotIn("increment", sig.parameters)
-        self.assertEqual(sig.parameters["min_border_contact"].default, 100)
-        self.assertFalse(sig.parameters["enable_gradient_check"].default)
-        self.assertFalse(sig.parameters["enable_fill_ratio_check"].default)
+        # min_border_contact=None -> pro Tile aus der GSD (80 m, siehe
+        # DEFAULT_MIN_BORDER_CONTACT_M).
+        self.assertIsNone(sig.parameters["min_border_contact"].default)
+        self.assertEqual(fixnodata.DEFAULT_MIN_BORDER_CONTACT_M, 80.0)
 
 
 # ============================================================

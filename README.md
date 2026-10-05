@@ -277,8 +277,8 @@ Bereinigung läuft erst nach dem Sicherheitscheck; bei Abbruch wird nichts gelö
 
 **Klassifikation falscher NoData-Pixel** (`3_fix_false_nodata_dop.py`, Connected-Component-Labeling):
 - Grösse der Pixelgruppe ≥ Schwelle (Default: automatisch pro Tile aus der GSD berechnet, entsprechend 900 m² – siehe `DEFAULT_MIN_NODATA_AREA_M2`; die frühere fixe Schwelle von 25'000 Pixel entsprach bei 10cm GSD nur 250 m² und war für alpines Gelände zu knapp bemessen)
-- Randkontakt zum Tile-Rand (Default ≥100 Pixel)
-- Zusätzliche Rand-/Füllgrad-Prüfungen existieren als CLI-Flags (`--enable-gradient-check`, `--enable-fill-ratio-check`), sind aber standardmässig **deaktiviert**, da sie bei weich ausgeblendeten Mosaikkanten (Feathering) zu Fehlklassifikationen führen können.
+- Randkontakt zum Tile-Rand ≥ 80 m (`DEFAULT_MIN_BORDER_CONTACT_M`, pro Tile aus der GSD in Pixel umgerechnet; früher fix 100 Pixel = nur 10 m bei 10cm GSD). Herleitung: echtes NoData mit geradem Perimeterschnitt und ≥ 900 m² hat geometrisch mindestens ≈ 85 m Randkontakt (Eck-Dreieck).
+- Form-Prüfung (Stufe D) gegen überstrahlte Gletscherflächen an Kachelgrenzen: eine Gruppe gilt trotz Grösse und Randkontakt als falsch, wenn sie **sowohl** viele Einschlüsse (Anteil eingeschlossener Nicht-NoData-Pixel ≥ 0.01) **als auch** eine zerfranste Kontur hat (Konturlänge / Bounding-Box-Umfang ≥ 1.5). Perimeter-Schnitte liegen bei ~0 bzw. ~1.0. Die Prüfung nutzt nur die Geometrie der NoData-Pixel, nicht die Grauwerte daneben – die frühere Gradient-Prüfung war bei gefeatherten Mosaikkanten fehleranfällig (Vorfall WALLIS_SAASTAL) und wurde entfernt. Schwellen abgeleitet aus 2019_BIS_HOHLICHT_TURTMANN; zum Prüfen weiterer Datensätze: `tools/diagnose_nodata_groups.py`.
 
 Korrekturwerte sind fix im Skript hinterlegt (keine GUI-/CLI-Parameter): falsche 255er-Gruppen werden um −1 verschoben, nahe-schwarze Schattenpixel gestuft angehoben. Bei NoData-Wahl `255 255 255` werden zusätzlich alle echten NoData-Pixel auf `0 0 0` normalisiert (GDAL-Tag und XML sind bei SB_DOP ohnehin immer `0`-normalisiert).
 
