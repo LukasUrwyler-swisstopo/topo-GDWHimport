@@ -19,6 +19,12 @@ Verwendung (OSGeo4W-Shell):
 
   --label-tif-dir schreibt pro Tile ein Label-GeoTIFF (uint16, Wert =
   label_id) der Gruppen >= Stufe A, zum Abgleich mit der Tabelle in QGIS.
+
+Ob ein Tile Rand-Tile des Gesamt-Orthophotos ist (find_edge_tiles), wird
+wie in der GUI aus allen nicht-leeren .tif im Ordner des Tiles bestimmt
+(Ordner mit _leere_Tiles\\ aus einem frueheren GUI-Lauf: dort liegen die
+leeren Tiles bereits ausserhalb und zaehlen ebenfalls nicht). Spalte
+edge_override = Stufe D haette "falsch" ergeben, Rand-Tile -> "echt".
 """
 
 import argparse
@@ -86,7 +92,7 @@ def _write_labels(path, labels, gt, crs_wkt):
             ds.write(labels, 1)
 
 
-def diagnose_tile(mod3, path, nodata):
+def diagnose_tile(mod3, path, nodata, edge_tile=False):
     rgb, gt, crs_wkt = _read_tile(path)
     name = os.path.basename(path)
     # Script 3 setzt bei fehlender Projektion EPSG:2056 als Fallback
@@ -101,7 +107,8 @@ def diagnose_tile(mod3, path, nodata):
     del rgb
 
     _, log_rows = mod3.classify_mask(
-        mask, threshold=threshold, min_border_contact=min_border_contact)
+        mask, threshold=threshold, min_border_contact=min_border_contact,
+        edge_tile=edge_tile)
 
     rows = []
     for g in log_rows:
@@ -116,10 +123,13 @@ def diagnose_tile(mod3, path, nodata):
             "hole_ratio": None if g["hole_ratio"] is None else round(g["hole_ratio"], 4),
             "roughness": None if g["roughness"] is None else round(g["roughness"], 3),
             "decision_ABC": "real_nodata" if abc_real else "false_nodata",
+            "edge_tile": edge_tile,
+            "edge_override": g["edge_override"],
             "decision": g["decision"],
         })
-    log.info("%s: GSD %.3f m, Stufe A >= %d px, Stufe C >= %d px, %d Gruppe(n), %d ab Stufe A",
-             name, pixel_size, threshold, min_border_contact, len(log_rows), len(rows))
+    log.info("%s%s: GSD %.3f m, Stufe A >= %d px, Stufe C >= %d px, %d Gruppe(n), %d ab Stufe A",
+             name, " [Rand-Tile]" if edge_tile else "", pixel_size, threshold,
+             min_border_contact, len(log_rows), len(rows))
     return rows, mask, gt, crs_wkt
 
 
@@ -140,9 +150,18 @@ def main():
         return 1
 
     all_rows = []
+    edge_maps = {}  # Ordner -> find_edge_tiles-Ergebnis
     for path in args.tiles:
         try:
-            rows, mask, gt, crs_wkt = diagnose_tile(mod3, path, args.nodata)
+            folder = os.path.dirname(os.path.abspath(path))
+            if folder not in edge_maps:
+                # leere Tiles zaehlen wie in der GUI nicht als Nachbar
+                edge_maps[folder] = mod3.find_edge_tiles(
+                    f for f in os.listdir(folder)
+                    if f.lower().endswith((".tif", ".tiff"))
+                    and not mod3.is_tile_empty(os.path.join(folder, f), args.nodata))
+            edge_tile = edge_maps[folder].get(os.path.basename(path), True)
+            rows, mask, gt, crs_wkt = diagnose_tile(mod3, path, args.nodata, edge_tile)
         except Exception as exc:
             log.error("%s: %s", path, exc)
             continue

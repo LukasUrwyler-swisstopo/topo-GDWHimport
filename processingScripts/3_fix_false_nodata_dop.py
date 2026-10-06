@@ -29,6 +29,10 @@ Hintergrund:
     ein kompakter Block ohne Einschluesse mit glatter Kontur, ein
     Gletscher hat viele eingeschlossene 250-254er-Pixel (Spalten, Firn-
     strukturen) und einen zerfransten Rand (Stufe D, siehe classify_mask).
+  - Ausnahme Rand-Tiles des Gesamt-Orthophotos (siehe find_edge_tiles):
+    grenzt dort ein ueberstrahlter Gletscher an echtes NoData, bilden beide
+    eine einzige Gruppe, die nicht trennbar ist. Stufe D darf eine solche
+    Gruppe dort nicht zu "falsch" erklaeren, sie bleibt echtes NoData.
 
 Vorgehen:
   1. Maske bilden: alle Pixel, bei denen R, G und B gleichzeitig dem
@@ -163,11 +167,64 @@ def _group_shape_metrics(group_crop):
     return int(holes.sum()), contour / (2.0 * (h + w))
 
 
+def parse_tile_key(filename):
+    """
+    TileKey als (E, N) in km aus dem Dateinamen: die zwei Namensteile direkt
+    vor 'LV95', identisch zu extract_tile_lv95 in Script 1
+    (..._2601_1136_LV95.tif -> (2601, 1136)). None, falls nicht lesbar.
+    """
+    parts = os.path.splitext(os.path.basename(filename))[0].split("_")
+    try:
+        idx = parts.index("LV95")
+        if idx < 2:
+            return None
+        return int(parts[idx - 2]), int(parts[idx - 1])
+    except ValueError:
+        return None
+
+
+def find_edge_tiles(filenames):
+    """
+    Bestimmt die Rand-Tiles des Gesamt-Orthophotos ueber die TileKeys:
+    Rand-Tile = mindestens einer der 8 Nachbarn (inkl. Diagonalen) fehlt im
+    Tile-Set. Vollstaendig leere Tiles (is_tile_empty) muss der Aufrufer
+    vorher entfernen, sonst zaehlen sie als vorhandener Nachbar und ein
+    Tile daneben gilt faelschlich als inneres Tile. Die Diagonalen zaehlen mit, weil echtes NoData auch nur in
+    einer Tile-Ecke liegen kann (fehlendes Diagonal-Tile, Perimeter schneidet
+    die Ecke ab). Die Kachelweite wird aus den TileKeys selbst bestimmt
+    (kleinster Abstand), damit nicht nur 1-km-Kacheln funktionieren.
+
+    Rueckgabe: dict Dateiname -> True (Rand-Tile) / False (inneres Tile).
+    Tiles ohne lesbaren TileKey gelten als Rand-Tile (im Zweifel echt).
+    """
+    keys = {fn: parse_tile_key(fn) for fn in filenames}
+    present = {k for k in keys.values() if k is not None}
+
+    def _step(values):
+        vals = sorted(set(values))
+        return min((b - a for a, b in zip(vals, vals[1:])), default=1)
+
+    step_e = _step(k[0] for k in present)
+    step_n = _step(k[1] for k in present)
+
+    edge = {}
+    for fn, key in keys.items():
+        if key is None:
+            edge[fn] = True
+            continue
+        e, n = key
+        edge[fn] = any(
+            (e + de * step_e, n + dn * step_n) not in present
+            for de in (-1, 0, 1) for dn in (-1, 0, 1) if de or dn
+        )
+    return edge
+
+
 def classify_mask(mask_zero, threshold=25000, connectivity=8,
                   min_border_contact=100,
                   min_hole_ratio=DEFAULT_MIN_HOLE_RATIO,
                   min_roughness=DEFAULT_MIN_ROUGHNESS,
-                  enable_shape_check=True):
+                  enable_shape_check=True, edge_tile=False):
     """
     Klassifiziert zusammenhaengende Gruppen von True-Werten in mask_zero
     als "echtes NoData" (bleibt) oder "falsches NoData" (wird korrigiert).
@@ -194,6 +251,18 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
          faelschlich als Ueberstrahlung an und wurde entfernt. Die neue
          Stufe D wertet nur die Geometrie der exakten NoData-Pixel aus,
          nicht die Grauwerte daneben.
+
+         Ausnahme Rand-Tile (edge_tile=True, siehe find_edge_tiles): dort
+         bleibt eine Gruppe, die A-C erfuellt, echt, auch wenn D "Gletscher"
+         sagt (log_rows: edge_override=True). Grenzt ein ueberstrahlter
+         Gletscher (255) direkt an echtes NoData, bilden beide eine einzige
+         Gruppe; die Einschluesse und der zerfranste Rand des Gletscherteils
+         erklaerten sonst die ganze Gruppe als falsch -> das echte NoData
+         wurde 254 und als weisse Flaeche sichtbar (Vorfall
+         2019_BIS_HOHLICHT_TURTMANN, 06.10.2026). Die Grenze zwischen
+         beiden Teilen ist aus den Pixelwerten nicht bestimmbar, die
+         ausgebrannten Gletscherpixel tragen ohnehin keine Bildinformation.
+         In inneren Tiles gilt D unveraendert.
 
     min_border_contact ist hier in Pixeln. process_tile rechnet ihn pro Tile
     aus DEFAULT_MIN_BORDER_CONTACT_M um.
@@ -236,6 +305,7 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
         touches_border = None
         hole_ratio = None
         roughness = None
+        edge_override = None
 
         if not is_candidate[label_id]:
             # Stufe A nicht erfuellt
@@ -252,7 +322,12 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
                 sl = slices[label_id - 1]
                 hole_px, roughness = _group_shape_metrics(labeled[sl] == label_id)
                 hole_ratio = hole_px / size
-                if hole_ratio >= min_hole_ratio and roughness >= min_roughness:
+                looks_like_glacier = bool(hole_ratio >= min_hole_ratio
+                                          and roughness >= min_roughness)
+                # Rand-Tile: Gletscher + echtes NoData evtl. eine Gruppe,
+                # dort im Zweifel echt (siehe Docstring)
+                edge_override = looks_like_glacier and edge_tile
+                if looks_like_glacier and not edge_tile:
                     decision = "false_nodata"
                 else:
                     decision = "real_nodata"
@@ -267,6 +342,7 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
             "border_contact_px": border_contact_px,
             "hole_ratio": hole_ratio,
             "roughness": roughness,
+            "edge_override": edge_override,
             "decision": decision,
         })
 
@@ -391,6 +467,29 @@ def _copy_sidecar_tfw(src_path, dst_path):
     return None
 
 
+def is_tile_empty(path, nodata_value, chunk_rows=512):
+    """
+    True, wenn in den Baendern 1-3 jedes Pixel exakt nodata_value ist
+    (vollstaendig leeres Tile, z.B. ganz ausserhalb des Perimeters
+    mitgeliefert). Liest blockweise und bricht beim ersten Nutzdaten-Pixel
+    ab - bei einem normalen Tile genuegt meist der erste Block, nur leere
+    Tiles werden ganz gelesen.
+    """
+    if gdal is None:
+        raise RuntimeError("GDAL Python-Bindings (osgeo.gdal) nicht gefunden.")
+    ds = gdal.Open(path, gdal.GA_ReadOnly)
+    if ds.RasterCount < 3:
+        raise RuntimeError(f"{path}: erwarte mindestens 3 Baender (RGB), gefunden: {ds.RasterCount}")
+    xsize, ysize = ds.RasterXSize, ds.RasterYSize
+    bands = [ds.GetRasterBand(i) for i in (1, 2, 3)]
+    for y_off in range(0, ysize, chunk_rows):
+        rows = min(chunk_rows, ysize - y_off)
+        for band in bands:
+            if np.any(band.ReadAsArray(0, y_off, xsize, rows) != nodata_value):
+                return False
+    return True
+
+
 def pixel_thresholds(geotransform):
     """
     Rechnet die Stufe-A-Mindestflaeche (DEFAULT_MIN_NODATA_AREA_M2) und den
@@ -411,7 +510,7 @@ def process_tile(src_path, dst_path, threshold=None,
                   rewrite_real_nodata_to_zero=False, min_border_contact=None,
                   min_hole_ratio=DEFAULT_MIN_HOLE_RATIO,
                   min_roughness=DEFAULT_MIN_ROUGHNESS,
-                  enable_shape_check=True):
+                  enable_shape_check=True, edge_tile=False):
     """
     Liest ein RGB-Tile, korrigiert falsche NoData-Pixel und schreibt das
     Ergebnis nach dst_path. Gibt Zusammenfassungszahlen und alle
@@ -441,6 +540,12 @@ def process_tile(src_path, dst_path, threshold=None,
     min_hole_ratio / min_roughness / enable_shape_check:
       Stufe D (Form-Pruefung gegen ueberstrahlte Gletscherflaechen an
       Kachelgrenzen), siehe classify_mask.
+
+    edge_tile:
+      True, wenn das Tile am Rand des Gesamt-Orthophotos liegt (siehe
+      find_edge_tiles). Stufe D kann dann keine Gruppe mehr zu "falsch"
+      erklaeren, siehe classify_mask. Default False (D aktiv) - die
+      Rand-Info kennt nur der Aufrufer, der alle Tiles sieht.
 
     write_mask:
       Nur zusammen mit strip_existing_mask=True unterstuetzt. Schreibt direkt
@@ -537,6 +642,7 @@ def process_tile(src_path, dst_path, threshold=None,
         min_hole_ratio=min_hole_ratio,
         min_roughness=min_roughness,
         enable_shape_check=enable_shape_check,
+        edge_tile=edge_tile,
     )
     # group_rows: alle klassifizierten Gruppen dieses Tiles (fuer --report/
     # Diagnose).
@@ -708,7 +814,7 @@ def process_tile_inplace(path, backup_dir=None, **kwargs):
     **kwargs werden 1:1 an process_tile() weitergereicht (threshold,
     connectivity, write_tfw, strip_existing_mask, fallback_epsg,
     write_mask, rewrite_real_nodata_to_zero, min_border_contact,
-    min_hole_ratio, min_roughness, enable_shape_check).
+    min_hole_ratio, min_roughness, enable_shape_check, edge_tile).
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     base = os.path.basename(path)
@@ -847,6 +953,18 @@ def main():
             for f in tif_files
         ]
 
+    # Rand-Tiles immer aus allen Tiles des Quellordners bestimmen, auch bei
+    # --input (ein einzelnes Tile allein waere sonst immer Rand-Tile).
+    # Leere Tiles zaehlen nicht als Nachbar (siehe find_edge_tiles), werden
+    # hier aber nicht weggelassen, sondern komplett als echtes NoData
+    # ausgegeben.
+    src_dir = args.input_dir or os.path.dirname(os.path.abspath(args.input))
+    src_tifs = [f for f in os.listdir(src_dir) if f.lower().endswith((".tif", ".tiff"))]
+    empty = {f for f in src_tifs if is_tile_empty(os.path.join(src_dir, f), args.nodata_value)}
+    edge_map = find_edge_tiles(f for f in src_tifs if f not in empty)
+    print(f"Rand-Tiles (TileKey, 8er-Nachbarschaft): {sum(edge_map.values())} "
+          f"von {len(edge_map)} Tiles in {src_dir}, {len(empty)} leere Tile(s)")
+
     all_report_rows = []
     n_ok = 0
     n_failed = 0
@@ -866,6 +984,7 @@ def main():
                 min_hole_ratio=args.min_hole_ratio,
                 min_roughness=args.min_roughness,
                 enable_shape_check=not args.disable_shape_check,
+                edge_tile=edge_map.get(name, True),
             )
             if args.in_place:
                 result = process_tile_inplace(src_path, backup_dir=args.backup_dir, **common_kwargs)
@@ -897,7 +1016,7 @@ def main():
             writer = csv.DictWriter(
                 f, fieldnames=["tile", "label_id", "size_px", "touches_border",
                                "border_contact_px", "hole_ratio",
-                               "roughness", "decision"]
+                               "roughness", "edge_override", "decision"]
             )
             writer.writeheader()
             writer.writerows(all_report_rows)

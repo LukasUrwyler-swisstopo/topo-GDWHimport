@@ -33,9 +33,10 @@ def _default_worker_count():
     return max(1, min(cpu - 2, 8))
 
 
-def _fix_false_nodata_one(mod3, path, nodata_value):
+def _fix_false_nodata_one(mod3, path, nodata_value, edge_tile=False):
     """Verarbeitet ein einzelnes Tile in-place (siehe Kommentare in
-    _run_fix_false_nodata zu den Parametern). Jedes Tile ist unabhaengig
+    _run_fix_false_nodata zu den Parametern; edge_tile siehe
+    find_edge_tiles in Script 3). Jedes Tile ist unabhaengig
     (eigene Datei, eigene temporaere Datei via tempfile.mkstemp), kein
     gemeinsamer Zustand zwischen Tiles - GDAL-I/O sowie die numpy/scipy-
     Rasterarbeit (Connected-Component-Labeling in classify_mask) geben den
@@ -45,7 +46,31 @@ def _fix_false_nodata_one(mod3, path, nodata_value):
     return mod3.process_tile_inplace(
         path, nodata_value=nodata_value,
         strip_existing_mask=True, write_mask=True,
-        rewrite_real_nodata_to_zero=(nodata_value == 255))
+        rewrite_real_nodata_to_zero=(nodata_value == 255),
+        edge_tile=edge_tile)
+
+
+LEERE_TILES_ORDNER = "_leere_Tiles"
+
+
+def _verschiebe_leeres_tile(quelle, fn):
+    """Verschiebt ein vollstaendig leeres Tile samt gleichnamigen
+    Begleitdateien (.tfw, .tif.aux.xml, .ovr ...) in den Unterordner
+    LEERE_TILES_ORDNER. Script 1 und die GUI lesen bei SB_DOP nur die oberste
+    Ordnerebene - das Tile bekommt so kein XML, keinen files.csv-Eintrag und
+    wird nicht ins Bucket kopiert. Verschieben statt Loeschen, weil quelle
+    ohne Staging der Original-Ordner ist. Gibt die verschobenen Dateinamen
+    zurueck."""
+    ziel_dir = os.path.join(quelle, LEERE_TILES_ORDNER)
+    os.makedirs(ziel_dir, exist_ok=True)
+    prefix = os.path.splitext(fn)[0] + "."
+    verschoben = []
+    for entry in sorted(os.listdir(quelle)):
+        src = os.path.join(quelle, entry)
+        if entry.startswith(prefix) and os.path.isfile(src):
+            os.replace(src, os.path.join(ziel_dir, entry))
+            verschoben.append(entry)
+    return verschoben
 
 
 def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
@@ -65,6 +90,10 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
     nur die Log-Reihenfolge der Fortschrittszeilen kann abweichen, die
     Detail-Zeilen pro Gruppe werden bewusst erst danach in der urspruenglichen
     (sortierten) Dateireihenfolge ausgegeben.
+
+    Vorab werden vollstaendig leere Tiles (alle Pixel = NoData-Zielwert)
+    weggelassen, siehe _verschiebe_leeres_tile. Sind alle Tiles leer, bricht
+    der Lauf ab, bevor etwas verschoben wird.
 
     Bricht beim ersten Fehler eines Tiles ab (noch nicht gestartete Tiles
     werden nicht mehr eingeplant) und wirft die Exception weiter, exakt wie
@@ -91,16 +120,49 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
         workers = _default_worker_count()
     workers = max(1, min(workers, len(tif_files)))
 
+    # Vollstaendig leere Tiles weglassen (siehe _verschiebe_leeres_tile).
+    # Muss vor der Rand-Tile-Bestimmung passieren: ein mitgeliefertes leeres
+    # Tile wuerde sonst als vorhandener Nachbar zaehlen.
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        leer_flags = list(executor.map(
+            lambda fn: mod3.is_tile_empty(os.path.join(quelle, fn), nodata_value), tif_files))
+    leere = [fn for fn, leer in zip(tif_files, leer_flags) if leer]
+    if len(leere) == len(tif_files):
+        raise RuntimeError(f"Alle {len(tif_files)} Tiles bestehen nur aus NoData ({nodata_value}) - "
+                           "Quellordner bzw. NoData-Wahl pruefen. Import abgebrochen.")
+    if leere:
+        print(f"Vollstaendig leere Tiles (nur NoData {nodata_value}): {len(leere)} - werden weggelassen "
+              f"(kein XML, kein files.csv-Eintrag, nicht ins Bucket), verschoben nach "
+              f"{os.path.join(quelle, LEERE_TILES_ORDNER)}:", flush=True)
+        for fn in leere:
+            verschoben = _verschiebe_leeres_tile(quelle, fn)
+            print(f"  - {', '.join(verschoben)}", flush=True)
+        tif_files = [fn for fn in tif_files if fn not in leere]
+        workers = min(workers, len(tif_files))
+
+    # Rand-Tiles des Gesamt-Orthophotos: dort kann Stufe D keine Gruppe mehr
+    # zu "falsch" erklaeren (Gletscher am echten NoData, siehe classify_mask)
+    edge_map = mod3.find_edge_tiles(tif_files)
+    ohne_key = [fn for fn in tif_files if mod3.parse_tile_key(fn) is None]
+    if ohne_key:
+        print(f"[WARNUNG] TileKey nicht lesbar bei {len(ohne_key)} Tile(s), werden als "
+              f"Rand-Tile behandelt: {', '.join(ohne_key[:5])}"
+              f"{' ...' if len(ohne_key) > 5 else ''}", flush=True)
+    print(f"Rand-Tiles (TileKey, 8er-Nachbarschaft): {sum(edge_map.values())} von "
+          f"{len(tif_files)} - dort Stufe D (Gletscher-Form) nur noch Richtung 'echt'.", flush=True)
+
     results = {}
     if workers <= 1 or len(tif_files) <= 1:
         for fn in tif_files:
             print(f"Verarbeite Datei: {fn}", flush=True)
-            results[fn] = _fix_false_nodata_one(mod3, os.path.join(quelle, fn), nodata_value)
+            results[fn] = _fix_false_nodata_one(mod3, os.path.join(quelle, fn), nodata_value,
+                                                edge_map[fn])
     else:
         print(f"Parallelisierung: {workers} gleichzeitige Worker (verfuegbare Kerne: {os.cpu_count()}).", flush=True)
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_fn = {
-                executor.submit(_fix_false_nodata_one, mod3, os.path.join(quelle, fn), nodata_value): fn
+                executor.submit(_fix_false_nodata_one, mod3, os.path.join(quelle, fn), nodata_value,
+                                edge_map[fn]): fn
                 for fn in tif_files
             }
             done = 0
@@ -127,7 +189,8 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
             f", {result['n_shadow_px']} Schattenpixel (0,0,0) geschuetzt"
             if result.get("n_shadow_px") else ""
         )
-        print(f"  {fn}: {result['n_groups']} Gruppe(n), {result['n_increment_px']} Pixel korrigiert{shadow_info}", flush=True)
+        rand_info = " [Rand-Tile]" if edge_map[fn] else ""
+        print(f"  {fn}{rand_info}: {result['n_groups']} Gruppe(n), {result['n_increment_px']} Pixel korrigiert{shadow_info}", flush=True)
         # Nur Gruppen ab Stufe A (Groesse) ausgeben - kleine Gruppen sind
         # ohnehin "falsch", bei Gletscher-/Schneekacheln sonst zehntausende
         # Logzeilen pro Tile.
@@ -137,11 +200,13 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
             form = ""
             if g.get("hole_ratio") is not None:
                 form = f", Einschluesse={g['hole_ratio']:.4f}, Rauheit={g['roughness']:.2f}"
+            override = " (Rand-Tile: Stufe D uebersteuert)" if g.get("edge_override") else ""
             print(f"    Gruppe {g['label_id']}: {g['size_px']} px, "
                   f"Randkontakt={g['border_contact_px']}{form}, "
-                  f"decision={g['decision']}", flush=True)
+                  f"decision={g['decision']}{override}", flush=True)
 
-    print(f"Vorkorrektur abgeschlossen: {len(tif_files)} Datei(en), {n_px_total} Pixel insgesamt korrigiert.\n", flush=True)
+    leer_info = f", {len(leere)} leere Tile(s) weggelassen" if leere else ""
+    print(f"Vorkorrektur abgeschlossen: {len(tif_files)} Datei(en), {n_px_total} Pixel insgesamt korrigiert{leer_info}.\n", flush=True)
 
 
 # ---------------------------------------------------------------------------
