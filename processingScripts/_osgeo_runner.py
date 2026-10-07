@@ -33,10 +33,10 @@ def _default_worker_count():
     return max(1, min(cpu - 2, 8))
 
 
-def _fix_false_nodata_one(mod3, path, nodata_value, edge_tile=False):
+def _fix_false_nodata_one(mod3, path, nodata_value, missing_neighbors=frozenset()):
     """Verarbeitet ein einzelnes Tile in-place (siehe Kommentare in
-    _run_fix_false_nodata zu den Parametern; edge_tile siehe
-    find_edge_tiles in Script 3). Jedes Tile ist unabhaengig
+    _run_fix_false_nodata zu den Parametern; missing_neighbors siehe
+    find_missing_neighbors in Script 3). Jedes Tile ist unabhaengig
     (eigene Datei, eigene temporaere Datei via tempfile.mkstemp), kein
     gemeinsamer Zustand zwischen Tiles - GDAL-I/O sowie die numpy/scipy-
     Rasterarbeit (Connected-Component-Labeling in classify_mask) geben den
@@ -47,7 +47,7 @@ def _fix_false_nodata_one(mod3, path, nodata_value, edge_tile=False):
         path, nodata_value=nodata_value,
         strip_existing_mask=True, write_mask=True,
         rewrite_real_nodata_to_zero=(nodata_value == 255),
-        edge_tile=edge_tile)
+        missing_neighbors=missing_neighbors)
 
 
 LEERE_TILES_ORDNER = "_leere_Tiles"
@@ -140,29 +140,31 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
         tif_files = [fn for fn in tif_files if fn not in leere]
         workers = min(workers, len(tif_files))
 
-    # Rand-Tiles des Gesamt-Orthophotos: dort kann Stufe D keine Gruppe mehr
-    # zu "falsch" erklaeren (Gletscher am echten NoData, siehe classify_mask)
-    edge_map = mod3.find_edge_tiles(tif_files)
+    # Rand-Tiles des Gesamt-Orthophotos: dort kann Stufe D Gruppen, die an
+    # eine Seite/Ecke ohne Nachbar-Tile grenzen, nicht mehr zu "falsch"
+    # erklaeren (Gletscher am echten NoData, siehe classify_mask)
+    neighbor_map = mod3.find_missing_neighbors(tif_files)
     ohne_key = [fn for fn in tif_files if mod3.parse_tile_key(fn) is None]
     if ohne_key:
         print(f"[WARNUNG] TileKey nicht lesbar bei {len(ohne_key)} Tile(s), werden als "
               f"Rand-Tile behandelt: {', '.join(ohne_key[:5])}"
               f"{' ...' if len(ohne_key) > 5 else ''}", flush=True)
-    print(f"Rand-Tiles (TileKey, 8er-Nachbarschaft): {sum(edge_map.values())} von "
-          f"{len(tif_files)} - dort Stufe D (Gletscher-Form) nur noch Richtung 'echt'.", flush=True)
+    print(f"Rand-Tiles (TileKey, 8er-Nachbarschaft): {sum(map(bool, neighbor_map.values()))} von "
+          f"{len(tif_files)} - dort Stufe D (Gletscher-Form) nur noch Richtung 'echt', "
+          f"wenn die Gruppe an eine Seite/Ecke ohne Nachbar-Tile grenzt.", flush=True)
 
     results = {}
     if workers <= 1 or len(tif_files) <= 1:
         for fn in tif_files:
             print(f"Verarbeite Datei: {fn}", flush=True)
             results[fn] = _fix_false_nodata_one(mod3, os.path.join(quelle, fn), nodata_value,
-                                                edge_map[fn])
+                                                neighbor_map[fn])
     else:
         print(f"Parallelisierung: {workers} gleichzeitige Worker (verfuegbare Kerne: {os.cpu_count()}).", flush=True)
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_fn = {
                 executor.submit(_fix_false_nodata_one, mod3, os.path.join(quelle, fn), nodata_value,
-                                edge_map[fn]): fn
+                                neighbor_map[fn]): fn
                 for fn in tif_files
             }
             done = 0
@@ -189,7 +191,8 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
             f", {result['n_shadow_px']} Schattenpixel (0,0,0) geschuetzt"
             if result.get("n_shadow_px") else ""
         )
-        rand_info = " [Rand-Tile]" if edge_map[fn] else ""
+        rand_info = (f" [Rand-Tile, fehlende Nachbarn: {mod3.describe_neighbors(neighbor_map[fn])}]"
+                     if neighbor_map[fn] else "")
         print(f"  {fn}{rand_info}: {result['n_groups']} Gruppe(n), {result['n_increment_px']} Pixel korrigiert{shadow_info}", flush=True)
         # Nur Gruppen ab Stufe A (Groesse) ausgeben - kleine Gruppen sind
         # ohnehin "falsch", bei Gletscher-/Schneekacheln sonst zehntausende
@@ -198,8 +201,11 @@ def _run_fix_false_nodata(mod3, quelle, meta, workers=None):
             if g["border_contact_px"] is None:
                 continue
             form = ""
+            if g.get("open_contact_px") is not None:
+                # Rand-Tile: Randkontakt zu Seiten/Ecken ohne Nachbar-Tile
+                form += f", davon offen={g['open_contact_px']}"
             if g.get("hole_ratio") is not None:
-                form = f", Einschluesse={g['hole_ratio']:.4f}, Rauheit={g['roughness']:.2f}"
+                form += f", Einschluesse={g['hole_ratio']:.4f}, Rauheit={g['roughness']:.2f}"
             override = " (Rand-Tile: Stufe D uebersteuert)" if g.get("edge_override") else ""
             print(f"    Gruppe {g['label_id']}: {g['size_px']} px, "
                   f"Randkontakt={g['border_contact_px']}{form}, "

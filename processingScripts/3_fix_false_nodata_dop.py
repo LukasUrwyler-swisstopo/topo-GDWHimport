@@ -29,10 +29,13 @@ Hintergrund:
     ein kompakter Block ohne Einschluesse mit glatter Kontur, ein
     Gletscher hat viele eingeschlossene 250-254er-Pixel (Spalten, Firn-
     strukturen) und einen zerfransten Rand (Stufe D, siehe classify_mask).
-  - Ausnahme Rand-Tiles des Gesamt-Orthophotos (siehe find_edge_tiles):
+  - Ausnahme Rand-Tiles des Gesamt-Orthophotos (siehe find_missing_neighbors):
     grenzt dort ein ueberstrahlter Gletscher an echtes NoData, bilden beide
     eine einzige Gruppe, die nicht trennbar ist. Stufe D darf eine solche
-    Gruppe dort nicht zu "falsch" erklaeren, sie bleibt echtes NoData.
+    Gruppe dort nicht zu "falsch" erklaeren, sie bleibt echtes NoData -
+    aber nur, wenn die Gruppe an eine Tile-Seite/-Ecke ohne Nachbar-Tile
+    grenzt (offener Randkontakt). Gletscher, die nur an vorhandene Tiles
+    grenzen, korrigiert Stufe D wie in inneren Tiles.
 
 Vorgehen:
   1. Maske bilden: alle Pixel, bei denen R, G und B gleichzeitig dem
@@ -183,19 +186,26 @@ def parse_tile_key(filename):
         return None
 
 
-def find_edge_tiles(filenames):
+# Nachbar-Richtungen als (dE, dN) in Kachelschritten, dN=+1 = Norden
+ALL_NEIGHBORS = frozenset((de, dn) for de in (-1, 0, 1) for dn in (-1, 0, 1) if de or dn)
+_NEIGHBOR_NAMES = {(0, 1): "N", (1, 1): "NO", (1, 0): "O", (1, -1): "SO",
+                   (0, -1): "S", (-1, -1): "SW", (-1, 0): "W", (-1, 1): "NW"}
+
+
+def find_missing_neighbors(filenames):
     """
-    Bestimmt die Rand-Tiles des Gesamt-Orthophotos ueber die TileKeys:
-    Rand-Tile = mindestens einer der 8 Nachbarn (inkl. Diagonalen) fehlt im
-    Tile-Set. Vollstaendig leere Tiles (is_tile_empty) muss der Aufrufer
-    vorher entfernen, sonst zaehlen sie als vorhandener Nachbar und ein
-    Tile daneben gilt faelschlich als inneres Tile. Die Diagonalen zaehlen mit, weil echtes NoData auch nur in
-    einer Tile-Ecke liegen kann (fehlendes Diagonal-Tile, Perimeter schneidet
-    die Ecke ab). Die Kachelweite wird aus den TileKeys selbst bestimmt
+    Bestimmt pro Tile, welche der 8 Nachbar-Tiles (inkl. Diagonalen) im
+    Tile-Set fehlen. Rand-Tile des Gesamt-Orthophotos = mindestens ein
+    Nachbar fehlt. Vollstaendig leere Tiles (is_tile_empty) muss der
+    Aufrufer vorher entfernen, sonst zaehlen sie als vorhandener Nachbar.
+    Die Diagonalen zaehlen mit, weil echtes NoData auch nur in einer
+    Tile-Ecke liegen kann (fehlendes Diagonal-Tile, Perimeter schneidet die
+    Ecke ab). Die Kachelweite wird aus den TileKeys selbst bestimmt
     (kleinster Abstand), damit nicht nur 1-km-Kacheln funktionieren.
 
-    Rueckgabe: dict Dateiname -> True (Rand-Tile) / False (inneres Tile).
-    Tiles ohne lesbaren TileKey gelten als Rand-Tile (im Zweifel echt).
+    Rueckgabe: dict Dateiname -> frozenset der fehlenden Richtungen (dE, dN),
+    leer = inneres Tile. Tiles ohne lesbaren TileKey: ALL_NEIGHBORS (alle
+    Seiten offen, im Zweifel echt).
     """
     keys = {fn: parse_tile_key(fn) for fn in filenames}
     present = {k for k in keys.values() if k is not None}
@@ -207,24 +217,49 @@ def find_edge_tiles(filenames):
     step_e = _step(k[0] for k in present)
     step_n = _step(k[1] for k in present)
 
-    edge = {}
+    missing = {}
     for fn, key in keys.items():
         if key is None:
-            edge[fn] = True
+            missing[fn] = ALL_NEIGHBORS
             continue
         e, n = key
-        edge[fn] = any(
-            (e + de * step_e, n + dn * step_n) not in present
-            for de in (-1, 0, 1) for dn in (-1, 0, 1) if de or dn
+        missing[fn] = frozenset(
+            (de, dn) for de, dn in ALL_NEIGHBORS
+            if (e + de * step_e, n + dn * step_n) not in present
         )
-    return edge
+    return missing
+
+
+def describe_neighbors(directions):
+    """Richtungen als Text fuers Log, z.B. 'N,NO,O'."""
+    return ",".join(name for d, name in _NEIGHBOR_NAMES.items() if d in directions)
+
+
+def _open_border_labels(labeled, missing_neighbors):
+    """
+    Labels aller Randpixel, hinter denen kein Nachbar-Tile liegt (offener
+    Randkontakt). Setzt ein nordorientiertes Raster voraus (Zeile 0 =
+    Norden, prueft process_tile). Seitenpixel: offen, wenn der direkte
+    Nachbar fehlt. Eckpixel: offen, wenn eines der drei Tiles an dieser Ecke
+    fehlt (zwei seitliche + diagonales).
+    """
+    parts = [px for d, px in (((0, 1), labeled[0, 1:-1]), ((0, -1), labeled[-1, 1:-1]),
+                              ((-1, 0), labeled[1:-1, 0]), ((1, 0), labeled[1:-1, -1]))
+             if d in missing_neighbors]
+    for (de, dn), (row, col) in (((-1, 1), (0, 0)), ((1, 1), (0, -1)),
+                                 ((-1, -1), (-1, 0)), ((1, -1), (-1, -1))):
+        if {(de, 0), (0, dn), (de, dn)} & missing_neighbors:
+            parts.append(np.atleast_1d(labeled[row, col]))
+    if not parts:
+        return np.empty(0, dtype=labeled.dtype)
+    return np.concatenate(parts)
 
 
 def classify_mask(mask_zero, threshold=25000, connectivity=8,
                   min_border_contact=100,
                   min_hole_ratio=DEFAULT_MIN_HOLE_RATIO,
                   min_roughness=DEFAULT_MIN_ROUGHNESS,
-                  enable_shape_check=True, edge_tile=False):
+                  enable_shape_check=True, missing_neighbors=frozenset()):
     """
     Klassifiziert zusammenhaengende Gruppen von True-Werten in mask_zero
     als "echtes NoData" (bleibt) oder "falsches NoData" (wird korrigiert).
@@ -252,16 +287,21 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
          Stufe D wertet nur die Geometrie der exakten NoData-Pixel aus,
          nicht die Grauwerte daneben.
 
-         Ausnahme Rand-Tile (edge_tile=True, siehe find_edge_tiles): dort
-         bleibt eine Gruppe, die A-C erfuellt, echt, auch wenn D "Gletscher"
-         sagt (log_rows: edge_override=True). Grenzt ein ueberstrahlter
-         Gletscher (255) direkt an echtes NoData, bilden beide eine einzige
-         Gruppe; die Einschluesse und der zerfranste Rand des Gletscherteils
-         erklaerten sonst die ganze Gruppe als falsch -> das echte NoData
-         wurde 254 und als weisse Flaeche sichtbar (Vorfall
-         2019_BIS_HOHLICHT_TURTMANN, 06.10.2026). Die Grenze zwischen
-         beiden Teilen ist aus den Pixelwerten nicht bestimmbar, die
-         ausgebrannten Gletscherpixel tragen ohnehin keine Bildinformation.
+         Ausnahme Rand-Tile (missing_neighbors nicht leer, siehe
+         find_missing_neighbors): dort bleibt eine Gruppe, die A-C erfuellt
+         und an eine offene Tile-Seite/-Ecke grenzt (_open_border_labels),
+         echt, auch wenn D "Gletscher" sagt (log_rows: edge_override=True).
+         Grenzt ein ueberstrahlter Gletscher (255) direkt an echtes NoData,
+         bilden beide eine einzige Gruppe; die Einschluesse und der
+         zerfranste Rand des Gletscherteils erklaerten sonst die ganze
+         Gruppe als falsch -> das echte NoData wurde 254 und als weisse
+         Flaeche sichtbar (Vorfall 2019_BIS_HOHLICHT_TURTMANN, 06.10.2026).
+         Die Grenze zwischen beiden Teilen ist aus den Pixelwerten nicht
+         bestimmbar (beide exakt NoData-Wert), die ausgebrannten
+         Gletscherpixel tragen ohnehin keine Bildinformation.
+         Grenzt die Gruppe nur an vorhandene Nachbar-Tiles, kann sie kein
+         Perimeter-NoData enthalten, das dort beginnt -> D gilt wie in
+         inneren Tiles (Loch im Gletscher am Rand-Tile, 07.10.2026).
          In inneren Tiles gilt D unveraendert.
 
     min_border_contact ist hier in Pixeln. process_tile rechnet ihn pro Tile
@@ -284,12 +324,17 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
     is_candidate = sizes >= threshold
     is_candidate[0] = False
     border_contact_counts = None
+    open_contact_counts = None
     slices = None
     if is_candidate.any():
         edge = np.concatenate([labeled[0, :], labeled[-1, :],
                                labeled[1:-1, 0], labeled[1:-1, -1]])
         border_contact_counts = np.bincount(edge[edge > 0], minlength=n_features + 1)
         slices = ndimage.find_objects(labeled)
+        if missing_neighbors:
+            open_edge = _open_border_labels(labeled, missing_neighbors)
+            open_contact_counts = np.bincount(open_edge[open_edge > 0],
+                                              minlength=n_features + 1)
 
     # Entscheid pro Label als Nachschlagetabelle: die Korrekturmaske entsteht
     # am Ende in einem einzigen Durchgang (false_lut[labeled]) statt einer
@@ -305,6 +350,7 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
         touches_border = None
         hole_ratio = None
         roughness = None
+        open_contact_px = None
         edge_override = None
 
         if not is_candidate[label_id]:
@@ -313,6 +359,8 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
         else:
             border_contact_px = int(border_contact_counts[label_id])
             touches_border = border_contact_px > 0
+            if open_contact_counts is not None:
+                open_contact_px = int(open_contact_counts[label_id])
             if not (touches_border and border_contact_px >= min_border_contact):
                 # Stufe B oder C nicht erfuellt
                 decision = "false_nodata"
@@ -324,10 +372,11 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
                 hole_ratio = hole_px / size
                 looks_like_glacier = bool(hole_ratio >= min_hole_ratio
                                           and roughness >= min_roughness)
-                # Rand-Tile: Gletscher + echtes NoData evtl. eine Gruppe,
-                # dort im Zweifel echt (siehe Docstring)
-                edge_override = looks_like_glacier and edge_tile
-                if looks_like_glacier and not edge_tile:
+                # Rand-Tile mit offenem Randkontakt: Gletscher + echtes
+                # NoData evtl. eine Gruppe, dort im Zweifel echt (siehe
+                # Docstring)
+                edge_override = looks_like_glacier and bool(open_contact_px)
+                if looks_like_glacier and not edge_override:
                     decision = "false_nodata"
                 else:
                     decision = "real_nodata"
@@ -342,6 +391,7 @@ def classify_mask(mask_zero, threshold=25000, connectivity=8,
             "border_contact_px": border_contact_px,
             "hole_ratio": hole_ratio,
             "roughness": roughness,
+            "open_contact_px": open_contact_px,
             "edge_override": edge_override,
             "decision": decision,
         })
@@ -510,7 +560,7 @@ def process_tile(src_path, dst_path, threshold=None,
                   rewrite_real_nodata_to_zero=False, min_border_contact=None,
                   min_hole_ratio=DEFAULT_MIN_HOLE_RATIO,
                   min_roughness=DEFAULT_MIN_ROUGHNESS,
-                  enable_shape_check=True, edge_tile=False):
+                  enable_shape_check=True, missing_neighbors=frozenset()):
     """
     Liest ein RGB-Tile, korrigiert falsche NoData-Pixel und schreibt das
     Ergebnis nach dst_path. Gibt Zusammenfassungszahlen und alle
@@ -541,11 +591,14 @@ def process_tile(src_path, dst_path, threshold=None,
       Stufe D (Form-Pruefung gegen ueberstrahlte Gletscherflaechen an
       Kachelgrenzen), siehe classify_mask.
 
-    edge_tile:
-      True, wenn das Tile am Rand des Gesamt-Orthophotos liegt (siehe
-      find_edge_tiles). Stufe D kann dann keine Gruppe mehr zu "falsch"
-      erklaeren, siehe classify_mask. Default False (D aktiv) - die
-      Rand-Info kennt nur der Aufrufer, der alle Tiles sieht.
+    missing_neighbors:
+      Fehlende Nachbar-Tiles (siehe find_missing_neighbors). Nicht leer =
+      Rand-Tile des Gesamt-Orthophotos: Stufe D kann dann Gruppen mit
+      offenem Randkontakt nicht mehr zu "falsch" erklaeren, siehe
+      classify_mask. Default leer (inneres Tile) - die Nachbar-Info kennt
+      nur der Aufrufer, der alle Tiles sieht. Ist das Raster nicht
+      nordorientiert, lassen sich die Tile-Seiten nicht zuordnen -> alle
+      Seiten gelten als offen (Verhalten wie vor dem 07.10.2026).
 
     write_mask:
       Nur zusammen mit strip_existing_mask=True unterstuetzt. Schreibt direkt
@@ -620,11 +673,18 @@ def process_tile(src_path, dst_path, threshold=None,
     xsize = ds.RasterXSize
     ysize = ds.RasterYSize
 
-    auto_threshold, auto_border_contact = pixel_thresholds(ds.GetGeoTransform())
+    geotransform = ds.GetGeoTransform()
+    auto_threshold, auto_border_contact = pixel_thresholds(geotransform)
     if threshold is None:
         threshold = auto_threshold
     if min_border_contact is None:
         min_border_contact = auto_border_contact
+
+    # Seiten-Zuordnung in _open_border_labels setzt Zeile 0 = Norden voraus
+    north_up = (geotransform[1] > 0 and geotransform[5] < 0
+                and geotransform[2] == 0 and geotransform[4] == 0)
+    if missing_neighbors and not north_up:
+        missing_neighbors = ALL_NEIGHBORS
 
     band_arrays = [ds.GetRasterBand(i).ReadAsArray() for i in range(1, n_bands + 1)]
     dtype = band_arrays[0].dtype
@@ -642,7 +702,7 @@ def process_tile(src_path, dst_path, threshold=None,
         min_hole_ratio=min_hole_ratio,
         min_roughness=min_roughness,
         enable_shape_check=enable_shape_check,
-        edge_tile=edge_tile,
+        missing_neighbors=missing_neighbors,
     )
     # group_rows: alle klassifizierten Gruppen dieses Tiles (fuer --report/
     # Diagnose).
@@ -661,7 +721,6 @@ def process_tile(src_path, dst_path, threshold=None,
 
     if strip_existing_mask:
         # Komplett neu aufbauen, nur 3 RGB-Baender, keine alte Maske/NoData
-        geotransform = ds.GetGeoTransform()
         projection_wkt = ds.GetProjection()
         used_fallback_epsg = False
         if not projection_wkt:
@@ -814,7 +873,7 @@ def process_tile_inplace(path, backup_dir=None, **kwargs):
     **kwargs werden 1:1 an process_tile() weitergereicht (threshold,
     connectivity, write_tfw, strip_existing_mask, fallback_epsg,
     write_mask, rewrite_real_nodata_to_zero, min_border_contact,
-    min_hole_ratio, min_roughness, enable_shape_check, edge_tile).
+    min_hole_ratio, min_roughness, enable_shape_check, missing_neighbors).
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     base = os.path.basename(path)
@@ -955,15 +1014,15 @@ def main():
 
     # Rand-Tiles immer aus allen Tiles des Quellordners bestimmen, auch bei
     # --input (ein einzelnes Tile allein waere sonst immer Rand-Tile).
-    # Leere Tiles zaehlen nicht als Nachbar (siehe find_edge_tiles), werden
-    # hier aber nicht weggelassen, sondern komplett als echtes NoData
+    # Leere Tiles zaehlen nicht als Nachbar (siehe find_missing_neighbors),
+    # werden hier aber nicht weggelassen, sondern komplett als echtes NoData
     # ausgegeben.
     src_dir = args.input_dir or os.path.dirname(os.path.abspath(args.input))
     src_tifs = [f for f in os.listdir(src_dir) if f.lower().endswith((".tif", ".tiff"))]
     empty = {f for f in src_tifs if is_tile_empty(os.path.join(src_dir, f), args.nodata_value)}
-    edge_map = find_edge_tiles(f for f in src_tifs if f not in empty)
-    print(f"Rand-Tiles (TileKey, 8er-Nachbarschaft): {sum(edge_map.values())} "
-          f"von {len(edge_map)} Tiles in {src_dir}, {len(empty)} leere Tile(s)")
+    neighbor_map = find_missing_neighbors(f for f in src_tifs if f not in empty)
+    print(f"Rand-Tiles (TileKey, 8er-Nachbarschaft): {sum(map(bool, neighbor_map.values()))} "
+          f"von {len(neighbor_map)} Tiles in {src_dir}, {len(empty)} leere Tile(s)")
 
     all_report_rows = []
     n_ok = 0
@@ -984,7 +1043,7 @@ def main():
                 min_hole_ratio=args.min_hole_ratio,
                 min_roughness=args.min_roughness,
                 enable_shape_check=not args.disable_shape_check,
-                edge_tile=edge_map.get(name, True),
+                missing_neighbors=neighbor_map.get(name, ALL_NEIGHBORS),
             )
             if args.in_place:
                 result = process_tile_inplace(src_path, backup_dir=args.backup_dir, **common_kwargs)
@@ -1016,7 +1075,8 @@ def main():
             writer = csv.DictWriter(
                 f, fieldnames=["tile", "label_id", "size_px", "touches_border",
                                "border_contact_px", "hole_ratio",
-                               "roughness", "edge_override", "decision"]
+                               "roughness", "open_contact_px", "edge_override",
+                               "decision"]
             )
             writer.writeheader()
             writer.writerows(all_report_rows)

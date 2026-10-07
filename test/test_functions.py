@@ -829,7 +829,7 @@ def _fake_mod3(fehler_bei=None, verzoegerung=None):
 
     return types.SimpleNamespace(
         process_tile_inplace=process_tile_inplace,
-        find_edge_tiles=lambda fns: {fn: False for fn in fns},
+        find_missing_neighbors=lambda fns: {fn: frozenset() for fn in fns},
         parse_tile_key=lambda fn: (0, 0),
         is_tile_empty=lambda path, nodata: False,
     ), aufrufe
@@ -843,7 +843,7 @@ class TestFixFalseNodataOne(unittest.TestCase):
         self.assertEqual(aufrufe[0][1], {
             "nodata_value": 255, "strip_existing_mask": True,
             "write_mask": True, "rewrite_real_nodata_to_zero": True,
-            "edge_tile": False})
+            "missing_neighbors": frozenset()})
 
     def test_parameter_nodata_0(self):
         mod3, aufrufe = _fake_mod3()
