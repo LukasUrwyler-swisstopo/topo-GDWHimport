@@ -35,6 +35,14 @@ Gleichwertig, aber anders kodiertes LV95 (alle GDS): z.B. historische SB_DSM mit
   Koordinaten wie EPSG:2056 (siehe _projects_like_lv95), gilt es als LV95 und
   der Tag wird ohne Rueckfrage auf das Soll normiert (Log-Zeile [INFO]).
 
+Bedeutungsloses lokales CRS (nur SB_DSM): z.B. ENGCRS/LOCAL_CS["unnamed"] ohne
+  Datum und Projektion, nur Meter-Achsen - Ueberrest von LAStools (historische
+  SB_DSM-Hillshades, vgl. 4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py). Es enthaelt keine
+  geodaetische Information und wird wie ein fehlendes CRS behandelt: Koordinaten
+  in der LV95-Ausdehnung -> Tag ohne Rueckfrage setzen (Log-Zeile [INFO]),
+  sonst harter Fehler. DOP unveraendert: lokales CRS gilt dort als fremdes CRS
+  ('retag', nur mit GUI-Bestaetigung).
+
 Aufruf (GUI-Vorpruefung, nur lesend):
     <osgeo_python> _tiff_crs.py <config.json>
     config.json: {"gds": "...", "meta_info": {...}, "files": ["<voller Pfad>", ...]}
@@ -149,7 +157,7 @@ def read_crs_info(file_path):
 
     info = {"has_crs": srs is not None, "in_lv95_extent": in_extent, "name": "",
             "method": "", "is_compound": False, "horizontal_is_lv95": False,
-            "lv95_equivalent": False, "vertical_epsg": None}
+            "lv95_equivalent": False, "local_only": False, "vertical_epsg": None}
     if srs is None:
         return info
 
@@ -157,6 +165,12 @@ def read_crs_info(file_path):
     lv95.ImportFromEPSG(2056)
     info["name"] = srs.GetName() or ""
     info["is_compound"] = bool(srs.IsCompound())
+    # Lokales CRS ohne Datum/Projektion in Metern: gleichbedeutend mit fehlendem CRS
+    info["local_only"] = bool(not info["is_compound"] and srs.IsLocal()
+                              and abs(srs.GetLinearUnits() - 1.0) < 1e-9)
+    if info["local_only"]:
+        info["method"] = _crs_method(srs)
+        return info
     if not info["is_compound"]:
         # IsSame statt EPSG-Code: auch ein gleichwertiges ESRI-WKT ohne ID gilt als LV95
         info["horizontal_is_lv95"] = bool(srs.IsSame(lv95))
@@ -178,18 +192,21 @@ def read_crs_info(file_path):
     return info
 
 
-def decide_crs_action(info, target):
+def decide_crs_action(info, target, accept_local=True):
     """
     'ok' (Tag stimmt) oder 'set' (Tag setzen). ValueError, wenn das CRS im TIFF
     dem Soll widerspricht: dann wird bewusst NICHT umgetaggt, sonst passten
     Koordinaten und CRS nicht mehr zusammen (z.B. LV03-Daten als LV95 getaggt,
-    LHN95-Hoehen als LN02).
+    LHN95-Hoehen als LN02). accept_local=False: lokales CRS ohne Datum/Projektion
+    gilt als fremdes CRS (DOP), sonst wie fehlendes CRS.
     """
     with_ln02 = target == CRS_LV95_LN02
-    if not info["has_crs"]:
+    if not info["has_crs"] or (accept_local and info.get("local_only")):
         if info["in_lv95_extent"]:
             return "set"
-        raise ValueError(f"kein CRS im TIFF und Koordinaten ausserhalb LV95 - "
+        what = (f"nur lokales CRS '{info['name']}' (ohne Datum/Projektion)"
+                if info.get("local_only") else "kein CRS")
+        raise ValueError(f"{what} im TIFF und Koordinaten ausserhalb LV95 - "
                          f"{target} wird nicht gesetzt")
     if not info["horizontal_is_lv95"]:
         method = f" ({info['method']})" if info.get("method") else ""
@@ -235,8 +252,9 @@ def _check_one(path, GDS, meta_info):
         info = read_crs_info(path)
     except Exception as e:
         return fn, target, "error", str(e)
+    accept_local = GDS not in DOP_GDS
     try:
-        action = decide_crs_action(info, target)
+        action = decide_crs_action(info, target, accept_local)
     except Exception as e:
         if retag_allowed(GDS, info):
             return fn, target, "retag", f"{e}, Koordinaten in LV95"
@@ -245,20 +263,25 @@ def _check_one(path, GDS, meta_info):
     if warning:
         return fn, target, "warn", warning
     # Meldung bei 'set' nur fuer gleichwertig kodiertes LV95 (-> result['recoded'])
-    note = f"LV95 kodiert als '{info['method']}'" if info.get("lv95_equivalent") else None
-    return fn, target, action, note
+    # und lokales CRS (-> result['local'])
+    if info.get("lv95_equivalent"):
+        return fn, target, action, ("recoded", f"LV95 kodiert als '{info['method']}'")
+    if accept_local and info.get("local_only"):
+        return fn, target, action, ("local", f"lokales CRS '{info['name']}', Koordinaten in LV95")
+    return fn, target, action, None
 
 
 def check_files(GDS, meta_info, paths, workers=CHECK_WORKERS):
     """Prueft die CRS-Tags aller TIFF in paths (nur lesend). Ergebnis:
     {"ok": [fn], "set": [fn], "warn": [[fn, meldung]], "retag": [[fn, meldung]],
-     "error": [[fn, meldung]], "recoded": [[fn, meldung]], "targets": {fn: soll}} -
+     "error": [[fn, meldung]], "recoded": [[fn, meldung]], "local": [[fn, meldung]],
+     "targets": {fn: soll}} -
     'warn'-Dateien werden beim Setzen wie 'set' behandelt, 'retag'-Dateien nur mit
-    FORCE_LV95_KEY. 'recoded' ist eine Teilmenge von 'set' (gleichwertiges LV95 in
-    anderer Kodierung, nur fuers Log)."""
+    FORCE_LV95_KEY. 'recoded' (gleichwertiges LV95 in anderer Kodierung) und
+    'local' (bedeutungsloses lokales CRS) sind Teilmengen von 'set', nur fuers Log."""
     paths = [p for p in paths if p.lower().endswith(('.tif', '.tiff'))]
     result = {"ok": [], "set": [], "warn": [], "retag": [], "error": [], "recoded": [],
-              "targets": {}}
+              "local": [], "targets": {}}
     if not paths:
         return result
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(paths)))) as executor:
@@ -272,7 +295,8 @@ def check_files(GDS, meta_info, paths, workers=CHECK_WORKERS):
         else:
             result[action].append(fn)
             if action == "set" and message:
-                result["recoded"].append([fn, message])
+                key, text = message
+                result[key].append([fn, text])
     return result
 
 
@@ -325,6 +349,12 @@ def ensure_tiff_crs(src, files, GDS, meta_info, log=print):
         log(f"[INFO] {len(res['recoded'])} Datei(en) mit gleichwertigem, aber anders kodiertem "
             f"LV95 (dieselben Koordinaten wie {CRS_LV95}) - Tag wird auf das Soll normiert:")
         for fn, msg in res["recoded"]:
+            log(f"   - {fn}: {msg}")
+
+    if res["local"]:
+        log(f"[INFO] {len(res['local'])} Datei(en) mit lokalem CRS ohne Datum/Projektion "
+            f"(z.B. LAStools-Ueberrest) - wie fehlendes CRS behandelt, Tag wird gesetzt:")
+        for fn, msg in res["local"]:
             log(f"   - {fn}: {msg}")
 
     if res["retag"]:
