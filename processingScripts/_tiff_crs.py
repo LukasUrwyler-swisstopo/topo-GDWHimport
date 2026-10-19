@@ -28,6 +28,13 @@ DOP mit fremdem/unbekanntem horizontalem CRS (z.B. 'unnamed'), Koordinaten aber
   ueberschrieben - Pixel und Geotransformation bleiben unveraendert. Liegen die
   Koordinaten ausserhalb (z.B. LV03), bleibt es ein harter Fehler.
 
+Gleichwertig, aber anders kodiertes LV95 (alle GDS): z.B. historische SB_DSM mit
+  'Hotine Oblique Mercator (variant A)' statt variant B (EPSG:2056). IsSame()
+  erkennt das nicht, PROJ rechnet beide bei Azimut 90/90 als Swiss Oblique
+  Mercator (somerc). Liefert das CRS auf dem Bessel-Ellipsoid dieselben
+  Koordinaten wie EPSG:2056 (siehe _projects_like_lv95), gilt es als LV95 und
+  der Tag wird ohne Rueckfrage auf das Soll normiert (Log-Zeile [INFO]).
+
 Aufruf (GUI-Vorpruefung, nur lesend):
     <osgeo_python> _tiff_crs.py <config.json>
     config.json: {"gds": "...", "meta_info": {...}, "files": ["<voller Pfad>", ...]}
@@ -55,6 +62,12 @@ FORCE_LV95_KEY = "ForceCrsLV95"
 LV95_E_RANGE = (2_400_000, 2_900_000)
 LV95_N_RANGE = (1_000_000, 1_350_000)
 
+# Gleichwertigkeitstest mit EPSG:2056: Testpunkte (Laenge, Breite) ueber CH/FL,
+# Toleranz in Metern
+BESSEL_1841      = (6377397.155, 299.1528128)
+LV95_TEST_POINTS = ((5.9, 45.8), (10.5, 45.8), (5.9, 47.8), (10.5, 47.8), (8.2, 46.8))
+LV95_TEST_TOL_M  = 0.001
+
 # Header lesen ist I/O-gebunden (Netzlaufwerk) - Threads reichen
 CHECK_WORKERS = 8
 
@@ -77,6 +90,52 @@ def _in_lv95_extent(gt, cols, rows):
             and LV95_N_RANGE[0] <= min(ys) and max(ys) <= LV95_N_RANGE[1])
 
 
+def _projects_like_lv95(srs, lv95):
+    """True, wenn srs ein projiziertes CRS (Meter) auf dem Bessel-Ellipsoid ist,
+    das geographische Koordinaten wie EPSG:2056 abbildet (< LV95_TEST_TOL_M).
+    Verglichen wird nur die Projektion, je ab dem eigenen Basis-Geo-CRS - ohne
+    Datumsuebergang. Das Datum selbst nicht: mit den LV95-Parametern (Ursprung
+    2600000/1200000) auf Bessel kommt nur CH1903+ in Frage, LV03 faellt heraus."""
+    try:
+        if not srs.IsProjected() or abs(srs.GetLinearUnits() - 1.0) > 1e-9:
+            return False
+        if (abs(srs.GetSemiMajor() - BESSEL_1841[0]) > 1e-3
+                or abs(srs.GetInvFlattening() - BESSEL_1841[1]) > 1e-6):
+            return False
+        projected = []
+        for crs in (srs, lv95):
+            crs = crs.Clone()
+            geog = crs.CloneGeogCS()
+            crs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            geog.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            ct = osr.CoordinateTransformation(geog, crs)
+            projected.append([ct.TransformPoint(lon, lat)[:2] for lon, lat in LV95_TEST_POINTS])
+        return all(abs(a - b) < LV95_TEST_TOL_M
+                   for p, q in zip(*projected) for a, b in zip(p, q))
+    except Exception:
+        return False
+
+
+def _crs_method(srs):
+    """Kurzbeschreibung fuer Meldungen, z.B. 'Hotine Oblique Mercator (variant A)'."""
+    try:
+        if srs.IsProjected():
+            # WKT2-Methodenname, Fallback WKT1 (z.B. 'Hotine_Oblique_Mercator')
+            wkt2 = srs.ExportToWkt(["FORMAT=WKT2_2019"])
+            marker = 'METHOD["'
+            if marker in wkt2:
+                start = wkt2.index(marker) + len(marker)
+                return wkt2[start:wkt2.index('"', start)]
+            return srs.GetAttrValue("PROJECTION") or "projiziert"
+        if srs.IsGeographic():
+            return "geographisch"
+        if srs.IsLocal():
+            return "lokal/ohne Projektion"
+    except Exception:
+        pass
+    return "unbekannt"
+
+
 def read_crs_info(file_path):
     """Liest das CRS eines TIFF (read-only) als Dict fuer decide_crs_action."""
     ds = gdal.Open(file_path, gdal.GA_ReadOnly)
@@ -89,7 +148,8 @@ def read_crs_info(file_path):
         ds = None
 
     info = {"has_crs": srs is not None, "in_lv95_extent": in_extent, "name": "",
-            "is_compound": False, "horizontal_is_lv95": False, "vertical_epsg": None}
+            "method": "", "is_compound": False, "horizontal_is_lv95": False,
+            "lv95_equivalent": False, "vertical_epsg": None}
     if srs is None:
         return info
 
@@ -100,11 +160,17 @@ def read_crs_info(file_path):
     if not info["is_compound"]:
         # IsSame statt EPSG-Code: auch ein gleichwertiges ESRI-WKT ohne ID gilt als LV95
         info["horizontal_is_lv95"] = bool(srs.IsSame(lv95))
+        if not info["horizontal_is_lv95"]:
+            info["method"] = _crs_method(srs)
+            info["lv95_equivalent"] = info["horizontal_is_lv95"] = _projects_like_lv95(srs, lv95)
         return info
     if hasattr(srs, "StripVertical"):
         horizontal = srs.Clone()
         horizontal.StripVertical()
         info["horizontal_is_lv95"] = bool(horizontal.IsSame(lv95))
+        if not info["horizontal_is_lv95"]:
+            info["method"] = _crs_method(horizontal)
+            info["lv95_equivalent"] = info["horizontal_is_lv95"] = _projects_like_lv95(horizontal, lv95)
     else:
         # GDAL < 3.6 kennt StripVertical nicht
         info["horizontal_is_lv95"] = srs.GetAuthorityCode("PROJCS") == "2056"
@@ -126,13 +192,16 @@ def decide_crs_action(info, target):
         raise ValueError(f"kein CRS im TIFF und Koordinaten ausserhalb LV95 - "
                          f"{target} wird nicht gesetzt")
     if not info["horizontal_is_lv95"]:
-        raise ValueError(f"CRS '{info['name']}' ist nicht LV95 (EPSG:2056)")
+        method = f" ({info['method']})" if info.get("method") else ""
+        raise ValueError(f"CRS '{info['name']}'{method} ist nicht LV95 (EPSG:2056)")
+    # gleichwertiges, aber anders kodiertes LV95: Tag auf das Soll normieren
+    recode = bool(info.get("lv95_equivalent"))
     if not info["is_compound"]:
-        return "set" if with_ln02 else "ok"
+        return "set" if with_ln02 or recode else "ok"
     if not with_ln02:
         return "set"  # Hoehenbezug entfernen - bei DOP siehe vertical_warning
     if info["vertical_epsg"] == VERTICAL_LN02:
-        return "ok"
+        return "set" if recode else "ok"
     raise ValueError(f"Hoehenbezug in '{info['name']}' ist nicht LN02 (EPSG:5728)")
 
 
@@ -173,16 +242,23 @@ def _check_one(path, GDS, meta_info):
             return fn, target, "retag", f"{e}, Koordinaten in LV95"
         return fn, target, "error", str(e)
     warning = vertical_warning(GDS, info)
-    return fn, target, ("warn" if warning else action), warning
+    if warning:
+        return fn, target, "warn", warning
+    # Meldung bei 'set' nur fuer gleichwertig kodiertes LV95 (-> result['recoded'])
+    note = f"LV95 kodiert als '{info['method']}'" if info.get("lv95_equivalent") else None
+    return fn, target, action, note
 
 
 def check_files(GDS, meta_info, paths, workers=CHECK_WORKERS):
     """Prueft die CRS-Tags aller TIFF in paths (nur lesend). Ergebnis:
     {"ok": [fn], "set": [fn], "warn": [[fn, meldung]], "retag": [[fn, meldung]],
-     "error": [[fn, meldung]], "targets": {fn: soll}} - 'warn'-Dateien werden beim
-    Setzen wie 'set' behandelt, 'retag'-Dateien nur mit FORCE_LV95_KEY."""
+     "error": [[fn, meldung]], "recoded": [[fn, meldung]], "targets": {fn: soll}} -
+    'warn'-Dateien werden beim Setzen wie 'set' behandelt, 'retag'-Dateien nur mit
+    FORCE_LV95_KEY. 'recoded' ist eine Teilmenge von 'set' (gleichwertiges LV95 in
+    anderer Kodierung, nur fuers Log)."""
     paths = [p for p in paths if p.lower().endswith(('.tif', '.tiff'))]
-    result = {"ok": [], "set": [], "warn": [], "retag": [], "error": [], "targets": {}}
+    result = {"ok": [], "set": [], "warn": [], "retag": [], "error": [], "recoded": [],
+              "targets": {}}
     if not paths:
         return result
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(paths)))) as executor:
@@ -195,6 +271,8 @@ def check_files(GDS, meta_info, paths, workers=CHECK_WORKERS):
             result[action].append([fn, message if action == "warn" else f"{message} (Soll {target})"])
         else:
             result[action].append(fn)
+            if action == "set" and message:
+                result["recoded"].append([fn, message])
     return result
 
 
@@ -242,6 +320,12 @@ def ensure_tiff_crs(src, files, GDS, meta_info, log=print):
         for fn, msg in errors:
             log(f"   - {fn}: {msg}")
         sys.exit(1)
+
+    if res["recoded"]:
+        log(f"[INFO] {len(res['recoded'])} Datei(en) mit gleichwertigem, aber anders kodiertem "
+            f"LV95 (dieselben Koordinaten wie {CRS_LV95}) - Tag wird auf das Soll normiert:")
+        for fn, msg in res["recoded"]:
+            log(f"   - {fn}: {msg}")
 
     if res["retag"]:
         log(f"[WARNUNG] {len(res['retag'])} DOP-Datei(en) mit fremdem CRS-Tag, Koordinaten "
