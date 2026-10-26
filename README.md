@@ -258,6 +258,7 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 | `processingScripts/3_fix_false_nodata_dop.py` | Optionale NoData-Vorkorrektur (SB_DOP), läuft in-place vor Script 1 | ✓ (eigenständiges CLI, siehe Docstring) |
 | `processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py` | LAS-1.4-Vorkonversion (SB_DSM_PUNKTWOLKE), läuft immer automatisch vor Script 1, schreibt auf Arbeitskopie; Ziel PF6, bei DMC-4 PF7 mit Pflicht-RGB (CLI: `--keep-rgb`) | ✓ (eigenständiges CLI, siehe Docstring) |
 | `processingScripts/_line_ids.py` | LineID-Formate je CameraSystem (Prüfung, Sortierung, BandID, STAC-Datum), von GUI und Script 1 genutzt | – |
+| `processingScripts/_datenpaket.py` | Ordnerstruktur des GDWH-Datenpakets: liest bei `SB_DSM_PUNKTWOLKE` die Schreibweise von `PreCalculatedFormats`/`PrecalculatedFormats` aus dem Bucket-Pfad (GDWH stellt per Deploy auf grosses C um), von GUI (Prüfung vor dem Start) und Script 1 (Kopie, `files.csv`) genutzt | – |
 | `processingScripts/_tiff_crs.py` | CRS-Tag im TIFF prüfen/setzen, von Script 1, Script 2_2 und der GUI-Vorprüfung (DOP, Aufruf nur lesend via OSGeo4W Python) genutzt | – |
 | `processingScripts/_osgeo_runner.py` | Interner Subprocess-Runner (OSGeo4W Python) | – |
 | `processingScripts/_tif_preview_reader.py` | Interner Subprocess-Helper: erzeugt die TIF-Vorschau im GUI | – |

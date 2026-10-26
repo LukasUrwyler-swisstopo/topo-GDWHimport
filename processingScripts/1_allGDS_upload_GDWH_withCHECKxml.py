@@ -1,4 +1,4 @@
-print("\nVersion 2.7.6 (TIFF-CRS SB_DSM: bedeutungsloses lokales CRS ohne Datum/Projektion (z.B. LAStools-Hillshade ENGCRS 'unnamed') wird wie fehlendes CRS behandelt - Koordinaten in LV95 -> Tag ohne Rueckfrage gesetzt, DOP unveraendert (Rueckfrage) | 2.7.5: TIFF-CRS: gleichwertiges, aber anders kodiertes LV95 (z.B. historische SB_DSM als 'Hotine Oblique Mercator (variant A)' statt variant B) wird erkannt und ohne Rueckfrage auf das Soll normiert, siehe _tiff_crs._projects_like_lv95 | "
+print("\nVersion 2.7.7 (SB_DSM_PUNKTWOLKE: Schreibweise des Ordners 'PreCalculatedFormats'/'PrecalculatedFormats' wird pro Datenpaket aus dem Bucket-Pfad gelesen und fuer Kopie und files.csv uebernommen - unabhaengig vom GDWH-Deploy, siehe _datenpaket.py | 2.7.6: TIFF-CRS SB_DSM: bedeutungsloses lokales CRS ohne Datum/Projektion (z.B. LAStools-Hillshade ENGCRS 'unnamed') wird wie fehlendes CRS behandelt - Koordinaten in LV95 -> Tag ohne Rueckfrage gesetzt, DOP unveraendert (Rueckfrage) | 2.7.5: TIFF-CRS: gleichwertiges, aber anders kodiertes LV95 (z.B. historische SB_DSM als 'Hotine Oblique Mercator (variant A)' statt variant B) wird erkannt und ohne Rueckfrage auf das Soll normiert, siehe _tiff_crs._projects_like_lv95 | "
       "2.7.4: SB_DSM-Hillshade: gueltige Grauwerte vor dem GDWH-JPEG linear auf 0..225 gestaucht, damit JPEG kein Pixel auf NoData 255 hebt (Einzelpixel-NoData in STAC), siehe rescale_hillshade_for_jpeg | 2.7.3: Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade, SB_DOP und SB_DOP_16 EPSG:2056 (DOP: Warnung bei Hoehenbezug ungleich LN02) | "
       "2.6.1: SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
 
@@ -23,6 +23,8 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 import _line_ids
+# Ordnerstruktur des GDWH-Datenpakets: gemeinsames Modul mit der GUI
+import _datenpaket
 
 # ****************************** Log-Funktion ******************************
 # Hinweis: Dieses Script gibt alles auf die Konsole aus. Beim Start via GUI
@@ -802,8 +804,8 @@ def _csv_append(csv_path, row):
     with open(csv_path, 'a', encoding='utf-8') as f:
         f.write(("\n" if file_exists_with_content else "") + row)
 
-def _build_csv_rows_and_copy(output_path, full_file_path, GDS):
-    """Kopiert die Datei(en) an ihr NV-/PrecalculatedFormats-Ziel (inkl. MD5
+def _build_csv_rows_and_copy(output_path, full_file_path, GDS, precalc_dir=None):
+    """Kopiert die Datei(en) an ihr NV-/PreCalculatedFormats-Ziel (inkl. MD5
     im selben Lese-/Schreibdurchgang) und gibt die dabei entstandenen
     files.csv-Zeile(n) als Liste zurueck - OHNE sie zu schreiben.
 
@@ -812,7 +814,11 @@ def _build_csv_rows_and_copy(output_path, full_file_path, GDS):
     ThreadPoolExecutor parallel pro Kachel, files.csv darf aber nicht aus
     mehreren Threads gleichzeitig beschrieben werden und soll ausserdem
     deterministisch in der urspruenglichen Dateireihenfolge entstehen,
-    unabhaengig davon welcher Worker zuerst fertig wird."""
+    unabhaengig davon welcher Worker zuerst fertig wird.
+
+    precalc_dir: Schreibweise des PreCalculatedFormats-Ordners im Paket
+    (SB_DSM_PUNKTWOLKE, einmal in files_in_order ermittelt), ohne Angabe
+    wird sie hier aus output_path gelesen."""
     name = os.path.basename(full_file_path)
     name_parts = name.rsplit('.', 1)[0].split('_')
     ext = os.path.splitext(name)[1].lower()
@@ -853,17 +859,20 @@ def _build_csv_rows_and_copy(output_path, full_file_path, GDS):
         if os.path.exists(xml_src):
             copy_with_retry(xml_src, os.path.join(dst_nv, os.path.basename(xml_src)))
 
-        # Zweites Ziel: PrecalculatedFormats\SB_DSM_PUNKTWOLKE (anderer
+        # Zweites Ziel: PreCalculatedFormats\SB_DSM_PUNKTWOLKE (anderer
         # Zieldateiname, identischer Inhalt). Quelle dafuer ist die soeben
         # geschriebene dst_nv_file, NICHT nochmal full_file_path - spart den
         # zweiten vollen Lesevorgang der (ggf. entfernten) Original-Quelle.
-        dst_pre = os.path.join(output_path, "PrecalculatedFormats", "SB_DSM_PUNKTWOLKE")
+        # Schreibweise des Ordners wie von GDWH im Paket angelegt, siehe
+        # _datenpaket.precalc_dir.
+        precalc_dir = precalc_dir or _datenpaket.precalc_dir(output_path)
+        dst_pre = os.path.join(output_path, precalc_dir, "SB_DSM_PUNKTWOLKE")
         os.makedirs(dst_pre, exist_ok=True)
         new_name = f"SB_DSM_PUNKTWOLKE_LAZ_CHLV95_LN02_{tilekey}.laz"
         copy_with_retry(dst_nv_file, os.path.join(dst_pre, new_name))
 
         row_nv  = f"NV\\SB_DSM_PUNKTWOLKE\\{name};{md5};{tilekey};add;"
-        row_pre = f"PrecalculatedFormats\\SB_DSM_PUNKTWOLKE\\{new_name};{md5};{tilekey};add;"
+        row_pre = f"{precalc_dir}\\SB_DSM_PUNKTWOLKE\\{new_name};{md5};{tilekey};add;"
         return [row_nv, row_pre]
 
     # === SB_DOP / SB_DOP_16 ===
@@ -942,7 +951,7 @@ def _default_worker_count():
     return max(1, min(cpu - 2, 8))
 
 
-def _process_tile(fn, src, out, GDS, meta, cached_attrs):
+def _process_tile(fn, src, out, GDS, meta, cached_attrs, precalc_dir=None):
     """Verarbeitet eine einzelne Kachel (XML, NoData-Tag, Maske, Kopieren,
     files.csv-Zeile(n) berechnen). Jede Kachel ist unabhaengig (eigene
     Datei, kein gemeinsamer Zustand) - GDAL-Rasteroperationen und
@@ -1015,7 +1024,7 @@ def _process_tile(fn, src, out, GDS, meta, cached_attrs):
                         log(f"  Flag Mask bereits vorhanden, Berechnung uebersprungen: {fn}")
                     else:
                         tag_mask_on_raster(fp, nodata_str, rewrite_real_nodata_to_zero=rewrite_to_zero)
-        rows = _build_csv_rows_and_copy(out, fp, GDS)
+        rows = _build_csv_rows_and_copy(out, fp, GDS, precalc_dir)
         return {"status": "ok", "error": None, "traceback": None, "rows": rows}
     except Exception as e:
         return {"status": "failed", "error": str(e), "traceback": traceback.format_exc(), "rows": []}
@@ -1023,6 +1032,19 @@ def _process_tile(fn, src, out, GDS, meta, cached_attrs):
 
 def files_in_order(src, out, GDS, meta, workers=None):
     missing_xml = []
+
+    # SB_DSM_PUNKTWOLKE: Schreibweise des PreCalculatedFormats-Ordners einmal
+    # aus dem Datenpaket lesen (siehe _datenpaket.precalc_dir) - vor der
+    # Bereinigung, damit bei fehlendem Ordner nichts veraendert wurde.
+    precalc_dir = None
+    if GDS == "SB_DSM_PUNKTWOLKE":
+        try:
+            precalc_dir = _datenpaket.precalc_dir(out)
+        except ValueError as e:
+            log(f"[FEHLER] {e}")
+            sys.exit(1)
+        log(f"Datenpaket: Ordner '{precalc_dir}' gefunden - diese Schreibweise "
+            f"gilt fuer Kopie und files.csv.\n")
 
     # Altbestaende bereinigen (GDS-spezifische Whitelist),
     # bevor neue XML erzeugt werden.
@@ -1060,12 +1082,12 @@ def files_in_order(src, out, GDS, meta, workers=None):
     if workers <= 1 or len(files) <= 1:
         for fn in files:
             log(f"Verarbeite: {fn}")
-            results[fn] = _process_tile(fn, src, out, GDS, meta, cached_attrs)
+            results[fn] = _process_tile(fn, src, out, GDS, meta, cached_attrs, precalc_dir)
     else:
         log(f"Parallelisierung: {workers} gleichzeitige Worker (verfuegbare Kerne: {os.cpu_count()}).")
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_fn = {
-                executor.submit(_process_tile, fn, src, out, GDS, meta, cached_attrs): fn
+                executor.submit(_process_tile, fn, src, out, GDS, meta, cached_attrs, precalc_dir): fn
                 for fn in files
             }
             done = 0

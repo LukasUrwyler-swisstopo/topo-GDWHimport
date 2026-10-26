@@ -31,6 +31,8 @@ DIR_CHECK_MAX_AGE = 2.0
 if PROCESSING_DIR not in sys.path:
     sys.path.insert(0, PROCESSING_DIR)
 import _line_ids
+# Ordnerstruktur des GDWH-Datenpakets - gemeinsames Modul mit Script 1
+import _datenpaket
 
 # ─── Auswahllisten ────────────────────────────────────────────────────────────
 GDS_ITEMS = [
@@ -2333,8 +2335,17 @@ class GDWHApp(tk.Tk):
             elif not os.path.isdir(q):
                 errors.append(f"Quelle nicht gefunden oder nicht erreichbar:\n  {q}")
 
-        if not self.ziel_var.get().strip():
+        ziel = self.ziel_var.get().strip().strip('"')
+        if not ziel:
             errors.append("Ziel fehlt.")
+        elif gds == "SB_DSM_PUNKTWOLKE":
+            # Die Schreibweise liest Script 1 selbst aus dem Paket - hier nur
+            # pruefen, ob der Ordner da ist, bevor Staging und LAS14-
+            # Vorkonversion laufen (siehe _datenpaket.precalc_dir)
+            try:
+                _datenpaket.precalc_dir(ziel)
+            except ValueError as e:
+                errors.append(str(e))
 
         if gds not in ("SB_DSM", "SB_DSM_PUNKTWOLKE"):
             opts, _ = self._nodata_options()
