@@ -1,4 +1,4 @@
-print("\nVersion 2.7.7 (SB_DSM_PUNKTWOLKE: Schreibweise des Ordners 'PreCalculatedFormats'/'PrecalculatedFormats' wird pro Datenpaket aus dem Bucket-Pfad gelesen und fuer Kopie und files.csv uebernommen - unabhaengig vom GDWH-Deploy, siehe _datenpaket.py | 2.7.6: TIFF-CRS SB_DSM: bedeutungsloses lokales CRS ohne Datum/Projektion (z.B. LAStools-Hillshade ENGCRS 'unnamed') wird wie fehlendes CRS behandelt - Koordinaten in LV95 -> Tag ohne Rueckfrage gesetzt, DOP unveraendert (Rueckfrage) | 2.7.5: TIFF-CRS: gleichwertiges, aber anders kodiertes LV95 (z.B. historische SB_DSM als 'Hotine Oblique Mercator (variant A)' statt variant B) wird erkannt und ohne Rueckfrage auf das Soll normiert, siehe _tiff_crs._projects_like_lv95 | "
+print("\nVersion 2.7.8 (SB_DSM: DSM-Raster muessen Float32 sein, sonst Abbruch vor der Verarbeitung mit Liste der betroffenen Dateien - Hillshade nicht betroffen, siehe check_dsm_datatype | 2.7.7: SB_DSM_PUNKTWOLKE: Schreibweise des Ordners 'PreCalculatedFormats'/'PrecalculatedFormats' wird pro Datenpaket aus dem Bucket-Pfad gelesen und fuer Kopie und files.csv uebernommen - unabhaengig vom GDWH-Deploy, siehe _datenpaket.py | 2.7.6: TIFF-CRS SB_DSM: bedeutungsloses lokales CRS ohne Datum/Projektion (z.B. LAStools-Hillshade ENGCRS 'unnamed') wird wie fehlendes CRS behandelt - Koordinaten in LV95 -> Tag ohne Rueckfrage gesetzt, DOP unveraendert (Rueckfrage) | 2.7.5: TIFF-CRS: gleichwertiges, aber anders kodiertes LV95 (z.B. historische SB_DSM als 'Hotine Oblique Mercator (variant A)' statt variant B) wird erkannt und ohne Rueckfrage auf das Soll normiert, siehe _tiff_crs._projects_like_lv95 | "
       "2.7.4: SB_DSM-Hillshade: gueltige Grauwerte vor dem GDWH-JPEG linear auf 0..225 gestaucht, damit JPEG kein Pixel auf NoData 255 hebt (Einzelpixel-NoData in STAC), siehe rescale_hillshade_for_jpeg | 2.7.3: Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade, SB_DOP und SB_DOP_16 EPSG:2056 (DOP: Warnung bei Hoehenbezug ungleich LN02) | "
       "2.6.1: SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
 
@@ -383,6 +383,37 @@ def fix_dsm_false_nodata(file_path, false_nodata_value=DSM_FALSE_NODATA_VALUE,
     finally:
         ds.FlushCache()
         ds = None
+
+
+# SB_DSM DSM-Raster (nicht Hillshade) muessen Float32 sein: der NoData-Wert
+# -3.4028235e+38 (get_nodata_value) ist -FLT_MAX und trifft nur in Float32
+# exakt. Bei Float64 faende der NoData-Vergleich kein Pixel, bei Integer ist
+# der Wert nicht darstellbar - beides liefe ohne Fehlermeldung durch.
+DSM_REQUIRED_DATATYPE = gdal.GDT_Float32
+
+
+def check_dsm_datatype(src, files):
+    """
+    Prueft read-only den Datentyp aller SB_DSM DSM-Raster; Hillshade ist
+    ausgenommen (gleiche Abgrenzung wie is_sb_dsm_raster in _process_tile).
+    Gibt die Abweichungen als Liste (Dateiname, Meldung) zurueck, leer = ok.
+    """
+    expected = gdal.GetDataTypeName(DSM_REQUIRED_DATATYPE)
+    errors = []
+    for fn in files:
+        fn_lower = fn.lower()
+        if not fn_lower.endswith(('.tif', '.tiff')) or "_hillshade_" in fn_lower:
+            continue
+        try:
+            ds = gdal.Open(os.path.join(src, fn))
+            data_type = ds.GetRasterBand(1).DataType
+            ds = None
+        except Exception as e:
+            errors.append((fn, f"Datentyp nicht lesbar ({e})"))
+            continue
+        if data_type != DSM_REQUIRED_DATATYPE:
+            errors.append((fn, f"Type={gdal.GetDataTypeName(data_type)}, erwartet {expected}"))
+    return errors
 
 
 # SB_DSM Hillshade: Obergrenze der gueltigen Grauwerte vor der COG-Ableitung im
@@ -1045,6 +1076,18 @@ def files_in_order(src, out, GDS, meta, workers=None):
             sys.exit(1)
         log(f"Datenpaket: Ordner '{precalc_dir}' gefunden - diese Schreibweise "
             f"gilt fuer Kopie und files.csv.\n")
+
+    # SB_DSM: DSM-Raster muessen Float32 sein (siehe DSM_REQUIRED_DATATYPE) -
+    # vor der Bereinigung, damit bei Abbruch nichts veraendert wurde.
+    if GDS == "SB_DSM":
+        dtype_errors = check_dsm_datatype(src, os.listdir(src))
+        if dtype_errors:
+            log(f"[FEHLER] SB_DSM: DSM-Raster muessen "
+                f"{gdal.GetDataTypeName(DSM_REQUIRED_DATATYPE)} sein (Hillshade nicht betroffen) "
+                f"- Daten pruefen, es wurde nichts veraendert:")
+            for fn, msg in dtype_errors:
+                log(f"   - {fn}: {msg}")
+            sys.exit(1)
 
     # Altbestaende bereinigen (GDS-spezifische Whitelist),
     # bevor neue XML erzeugt werden.
