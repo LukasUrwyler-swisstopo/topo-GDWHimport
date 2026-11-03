@@ -142,6 +142,9 @@ NODATA_DOP_OPT = ["0 0 0   (schwarz, 8BIT RGB)",     "255 255 255   (weiss, 8BIT
 NODATA_DOP_VAL = ["0 0 0",                            "255 255 255"]
 NODATA_D16_OPT = ["0 0 0 0   (schwarz, 16BIT NRGB)", "65535 65535 65535 65535   (weiss, 16BIT NRGB)"]
 NODATA_D16_VAL = ["0 0 0 0",                          "65535 65535 65535 65535"]
+# Leica ADS80: NoData der DOP praktisch immer weiss -> Vorauswahl weiss, im
+# Dropdown weiterhin aenderbar (siehe _nodata_default). Sonst Vorauswahl schwarz.
+NODATA_ADS80_DEFAULT = {"SB_DOP": NODATA_DOP_VAL[1], "SB_DOP_16": NODATA_D16_VAL[1]}
 # SB_DOP mit Leica DMC-4: seit der Umstellung auf 4-Band RGBN (8bit) liefert die
 # DMC-Pipeline (Reality Studio -> DMC-Converter) immer vier Baender, NoData immer
 # schwarz. Darum genau eine Option, im GUI gesperrt. Die Wertzahl MUSS zur Bandzahl
@@ -189,6 +192,16 @@ _DOP_SPEC_ADS80 = {
 NAME_FORMAT_SPECS_ADS80 = {
     "SB_DOP":    _DOP_SPEC_ADS80,
     "SB_DOP_16": _DOP_SPEC_ADS80,
+    # Nach '_LV95_LN02' weitere Namensteile, Hillshade mit Endung '_HS'
+    # (siehe _datenpaket.is_hillshade)
+    "SB_DSM": {
+        "extensions": NAME_FORMAT_SPECS["SB_DSM"]["extensions"],
+        "regexes": NAME_FORMAT_SPECS["SB_DSM"]["regexes"]
+                   + [re.compile(r'^20\d{2}_.+_DSM_.*_LV95_LN02_.+\.(tif|tiff|tfw)$', re.IGNORECASE)],
+        "example":  NAME_FORMAT_SPECS["SB_DSM"]["example"] + "  oder (ADS80)  "
+                    "202X_AREANAME_DSM_..._LV95_LN02_....tif / .tfw  und/oder  "
+                    "202X_AREANAME_DSM_..._LV95_LN02_..._HS.tif / .tfw (Hillshade)",
+    },
     # Punktwolke: ASCII (Area zwischen Jahr und _DSM/_TIN)
     "SB_DSM_PUNKTWOLKE": {
         "extensions": (".laz",) + PUNKTWOLKE_ASCII_EXT,
@@ -1601,6 +1614,8 @@ class GDWHApp(tk.Tk):
         self.nodata_auto = ttk.Label(sec, font=("", 8), justify="left")
         self.nodata_auto.grid(row=r+1, column=1, sticky="w", padx=(8, 0))
         self._dim_labels.append(self.nodata_auto)
+        # Zuletzt gesetzte Vorauswahl, siehe _update_camera_nodata_rules
+        self._nodata_preset = None
 
         # check input-NoData – öffnet das erste Tiff im Quellordner als
         # herunterskalierte Vorschau (Popup, Zoom/Pan), damit die Rand-
@@ -2055,8 +2070,8 @@ class GDWHApp(tk.Tk):
             self.fix_nodata_cb.grid_remove()
             self.nodata_auto.config(
                 text="NoData wird automatisch gesetzt:\n"
-                     "  '_hillshade_' im Dateinamen  →  '255'  (Grauwerte → 0..225, JPEG-Reserve)\n"
-                     "  '_DSM_'       im Dateinamen  →  '-3.4028235e+38'")
+                     "  Hillshade ('_hillshade_' oder ADS80 '..._HS')  →  '255'  (Grauwerte → 0..225, JPEG-Reserve)\n"
+                     "  DSM ('_DSM_' im Dateinamen)  →  '-3.4028235e+38'")
             self.nodata_auto.grid()
         elif gds == "SB_DSM_PUNKTWOLKE":
             self.nodata_lbl.grid_remove()
@@ -2212,6 +2227,9 @@ class GDWHApp(tk.Tk):
           - SB_DOP mit DMC-4: NoData immer '0 0 0 0', Dropdown gesperrt. Die
             DMC-Pipeline (Reality Studio -> DMC-Converter) schreibt NoData immer
             schwarz, falsche NoData-Pixel in den Nutzdaten entstehen dort nicht.
+          - SB_DOP / SB_DOP_16 mit ADS80: Vorauswahl weiss, sonst schwarz (siehe
+            _nodata_default). Gesetzt nur, wenn sich die Vorauswahl aendert oder
+            die Auswahl ungueltig ist - eine manuelle Auswahl bleibt sonst stehen.
         Wird sowohl bei GDS- als auch bei CameraSystem-Wechsel aufgerufen (siehe
         _on_gds_change bzw. camera_var-Trace)."""
         if not hasattr(self, "fix_nodata_cb"):
@@ -2244,10 +2262,16 @@ class GDWHApp(tk.Tk):
             # Zurueck auf die GDS-Auswahl - sonst blieben die DMC-Werte stehen,
             # wenn man das CameraSystem wieder wechselt.
             self.nodata_cb.config(values=opts, state="readonly")
-            if self.nodata_var.get() not in opts:
-                self.nodata_var.set(opts[0])
+            preset = self._nodata_default()
+            if preset != self._nodata_preset or self.nodata_var.get() not in opts:
+                self._nodata_preset = preset
+                self.nodata_var.set(preset)
             # bei SB_DSM* traegt nodata_auto den Auto-Hinweis (siehe _on_gds_change)
-            if gds in ("SB_DOP", "SB_DOP_16"):
+            if gds in DOP_GDS and self.camera_var.get() == ADS80_CAMERA:
+                self.nodata_auto.config(
+                    text="ADS80: Vorauswahl weiss (NoData bei ADS80 praktisch immer weiss), änderbar")
+                self.nodata_auto.grid()
+            elif gds in DOP_GDS:
                 self.nodata_auto.grid_remove()
 
     # ── CameraSystem aus dem Jahr der Inputdaten ─────────────────────────────
@@ -2638,6 +2662,15 @@ class GDWHApp(tk.Tk):
         if gds == "SB_DOP_16":
             return NODATA_D16_OPT, NODATA_D16_VAL
         return NODATA_DOP_OPT, NODATA_DOP_VAL
+
+    def _nodata_default(self):
+        """Vorauswahl (Beschriftung) im NoData-Dropdown fuer die aktuelle
+        GDS-/CameraSystem-Kombination: ADS80-DOP weiss (NODATA_ADS80_DEFAULT),
+        sonst die erste Option."""
+        opts, vals = self._nodata_options()
+        val = (NODATA_ADS80_DEFAULT.get(self.gds_var.get())
+               if self.camera_var.get() == ADS80_CAMERA else None)
+        return opts[vals.index(val)] if val in vals else opts[0]
 
     def _get_nodata(self):
         gds  = self.gds_var.get()

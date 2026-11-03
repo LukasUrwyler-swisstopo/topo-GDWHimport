@@ -11,11 +11,30 @@ vorberechneten LAZ. Dessen Schreibweise stellt GDWH mit einem Deploy von
 offen). Der Pfad in files.csv muss exakt der Schreibweise im Paket
 entsprechen, deshalb wird sie pro Datenpaket aus dem Ordner gelesen statt fest
 codiert - das Script funktioniert so vor und nach dem Deploy.
+
+SB_DSM: DSM-Raster gehen nach NV\\DSM, Hillshades nach NV\\HILLSHADE (daraus
+macht GDWH die STAC-Assets dsm-raster.tif / dsm-hillshade.tif). Erkennung des
+Hillshades am Dateinamen siehe is_hillshade.
 """
 
 import os
 
 PRECALC_DIR_KEY = "precalculatedformats"
+
+
+def is_hillshade(filename):
+    """True, wenn filename (SB_DSM) ein Hillshade ist. Zwei Namensformen:
+      Namensteil 'hillshade':  2025_PLAINE_MORTE_hillshade_50cm_LV95_LN02.tif
+      Endung '_HS' (ADS80):    2016_SILVRETTA_DSM_1m_LV95_LN02_GG_wf_raw_HS.tif
+    Die ADS80-Form enthaelt auch '_DSM_' - diese Pruefung muss darum vor jeder
+    DSM-Erkennung ueber den Namen kommen."""
+    teile = os.path.splitext(os.path.basename(filename))[0].lower().split("_")
+    return "hillshade" in teile or teile[-1] == "hs"
+
+
+def sb_dsm_subfolder(filename):
+    """Unterordner unter NV im SB_DSM-Datenpaket: 'HILLSHADE' oder 'DSM'."""
+    return "HILLSHADE" if is_hillshade(filename) else "DSM"
 
 
 def precalc_dir(paket_pfad):

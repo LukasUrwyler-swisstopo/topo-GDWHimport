@@ -56,6 +56,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 from osgeo import gdal, osr
 
+# Hillshade-Erkennung (SB_DSM) - gemeinsam mit Script 1 und GUI, liegt daneben
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+import _datenpaket  # noqa: E402
+
 gdal.UseExceptions()
 
 CRS_LV95      = "EPSG:2056"
@@ -84,7 +90,7 @@ def tiff_crs_target(GDS, meta_info, filename=""):
     """Soll-CRS im TIFF-Tag der Datei filename oder None (keine Pruefung)."""
     if GDS == "SB_DSM":
         # Hillshade-Erkennung wie get_nodata_value in Script 1
-        return CRS_LV95 if "_hillshade_" in filename.lower() else CRS_LV95_LN02
+        return CRS_LV95 if _datenpaket.is_hillshade(filename) else CRS_LV95_LN02
     if GDS in DOP_GDS:
         return CRS_LV95
     return None

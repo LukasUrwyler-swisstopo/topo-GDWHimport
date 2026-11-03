@@ -1,4 +1,4 @@
-print("\nVersion 2.7.8 (SB_DSM: DSM-Raster muessen Float32 sein, sonst Abbruch vor der Verarbeitung mit Liste der betroffenen Dateien - Hillshade nicht betroffen, siehe check_dsm_datatype | 2.7.7: SB_DSM_PUNKTWOLKE: Schreibweise des Ordners 'PreCalculatedFormats'/'PrecalculatedFormats' wird pro Datenpaket aus dem Bucket-Pfad gelesen und fuer Kopie und files.csv uebernommen - unabhaengig vom GDWH-Deploy, siehe _datenpaket.py | 2.7.6: TIFF-CRS SB_DSM: bedeutungsloses lokales CRS ohne Datum/Projektion (z.B. LAStools-Hillshade ENGCRS 'unnamed') wird wie fehlendes CRS behandelt - Koordinaten in LV95 -> Tag ohne Rueckfrage gesetzt, DOP unveraendert (Rueckfrage) | 2.7.5: TIFF-CRS: gleichwertiges, aber anders kodiertes LV95 (z.B. historische SB_DSM als 'Hotine Oblique Mercator (variant A)' statt variant B) wird erkannt und ohne Rueckfrage auf das Soll normiert, siehe _tiff_crs._projects_like_lv95 | "
+print("\nVersion 2.7.9 (SB_DSM: Hillshade auch mit ADS80-Namensform '..._HS.tif' erkannt (z.B. 2016_SILVRETTA_DSM_1m_LV95_LN02_GG_wf_raw_HS.tif) - NoData, Float32-Pruefung, TIFF-CRS und Zielordner NV\\HILLSHADE wie beim '_hillshade_'-Namen, siehe _datenpaket.is_hillshade | 2.7.8: SB_DSM: DSM-Raster muessen Float32 sein, sonst Abbruch vor der Verarbeitung mit Liste der betroffenen Dateien - Hillshade nicht betroffen, siehe check_dsm_datatype | 2.7.7: SB_DSM_PUNKTWOLKE: Schreibweise des Ordners 'PreCalculatedFormats'/'PrecalculatedFormats' wird pro Datenpaket aus dem Bucket-Pfad gelesen und fuer Kopie und files.csv uebernommen - unabhaengig vom GDWH-Deploy, siehe _datenpaket.py | 2.7.6: TIFF-CRS SB_DSM: bedeutungsloses lokales CRS ohne Datum/Projektion (z.B. LAStools-Hillshade ENGCRS 'unnamed') wird wie fehlendes CRS behandelt - Koordinaten in LV95 -> Tag ohne Rueckfrage gesetzt, DOP unveraendert (Rueckfrage) | 2.7.5: TIFF-CRS: gleichwertiges, aber anders kodiertes LV95 (z.B. historische SB_DSM als 'Hotine Oblique Mercator (variant A)' statt variant B) wird erkannt und ohne Rueckfrage auf das Soll normiert, siehe _tiff_crs._projects_like_lv95 | "
       "2.7.4: SB_DSM-Hillshade: gueltige Grauwerte vor dem GDWH-JPEG linear auf 0..225 gestaucht, damit JPEG kein Pixel auf NoData 255 hebt (Einzelpixel-NoData in STAC), siehe rescale_hillshade_for_jpeg | 2.7.3: Leica DMC-4: LineID-Format YYYYMMDD_GGGG_QQQQQ_LLL_HHMMSS, geht unveraendert ins XML (siehe _line_ids.py), FirstAcquisitionTime/StacItemIdDatetime sekundengenau, BandID aus dem Linienstart der ersten Linie | TIFF-CRS pruefen/setzen: SB_DSM-DSM EPSG:2056+5728, SB_DSM-Hillshade, SB_DOP und SB_DOP_16 EPSG:2056 (DOP: Warnung bei Hoehenbezug ungleich LN02) | "
       "2.6.1: SB_DSM: historische falsche NoData-Pixel -9999 (LAStools, vom frueheren Extract-by-Mask nicht erfasst) werden automatisch auf den echten NoData-Wert korrigiert, siehe fix_dsm_false_nodata | Opt: parallele Kachel-Verarbeitung/Kopieren via ThreadPoolExecutor fuer SB_DOP/SB_DOP_16/SB_DSM/SB_DSM_PUNKTWOLKE, files.csv weiterhin deterministisch/seriell geschrieben | Bugfixes: WKT-Polygon, CSV-Leerzeile, GDAL-Handles, src-Parameter, Index-Guards | Stabilität: Log-Cleanup vollständig, Pfadprüfung, makedirs-Timing | Opt: MD5-Chunks 64KB, Fortschrittsanzeige, Traceback-Logging)\n")
 
@@ -270,7 +270,7 @@ def extract_area(filename, GDS):
     SB_DSM (hillshade):  zwischen '202X_' und '_hillshade'
                          Bsp: 2025_PLAINE_MORTE_hillshade_... -> 'PLAINE_MORTE'
 
-    SB_DSM (DSM):        zwischen '202X_' und '_DSM'
+    SB_DSM (DSM):        zwischen '202X_' und '_DSM' (auch ADS80-Hillshade ..._HS)
                          Bsp: 2025_PLAINE_MORTE_DSM_...  -> 'PLAINE_MORTE'
 
     SB_DSM_PUNKTWOLKE:   zwischen '202X_' und '_TIN'
@@ -316,13 +316,14 @@ def extract_tile_lv95(filename):
 def get_nodata_value(filename, GDS, meta_info):
     """
     Gibt den NoData-Wert zurück:
-    - SB_DSM + '_hillshade_' im Dateinamen -> immer '255' (1-Band Grayscale)
+    - SB_DSM Hillshade ('_hillshade_' oder ADS80 '..._HS', siehe
+      _datenpaket.is_hillshade)          -> immer '255' (1-Band Grayscale)
     - SB_DSM + '_DSM_' im Dateinamen       -> immer '-3.4028235e+38'
     - Alle anderen GDS                     -> aus meta_info["NoData"]
     """
     if GDS == "SB_DSM":
         fn_lower = filename.lower()
-        if "_hillshade_" in fn_lower:
+        if _datenpaket.is_hillshade(filename):
             # Hillshade ist 1-Band Grayscale (Type=Byte, ColorInterp=Gray) -
             # ein einzelner Wert wird von tag_nodata_on_raster/tag_mask_on_raster
             # automatisch auf die tatsaechliche Bandanzahl expandiert. Mit einem
@@ -401,8 +402,7 @@ def check_dsm_datatype(src, files):
     expected = gdal.GetDataTypeName(DSM_REQUIRED_DATATYPE)
     errors = []
     for fn in files:
-        fn_lower = fn.lower()
-        if not fn_lower.endswith(('.tif', '.tiff')) or "_hillshade_" in fn_lower:
+        if not fn.lower().endswith(('.tif', '.tiff')) or _datenpaket.is_hillshade(fn):
             continue
         try:
             ds = gdal.Open(os.path.join(src, fn))
@@ -856,7 +856,7 @@ def _build_csv_rows_and_copy(output_path, full_file_path, GDS, precalc_dir=None)
 
     # === SB_DSM ===
     if GDS == "SB_DSM":
-        subfolder = "HILLSHADE" if "hillshade" in name.lower() else "DSM"
+        subfolder = _datenpaket.sb_dsm_subfolder(name)
         dst_folder = os.path.join(output_path, "NV", subfolder)
         os.makedirs(dst_folder, exist_ok=True)
         md5 = None
@@ -1003,7 +1003,7 @@ def _process_tile(fn, src, out, GDS, meta, cached_attrs, precalc_dir=None):
             # zusaetzliche Maske fuehrte in STAC/Kartenviewer zu falscher
             # noData-Darstellung (Vorfall 23.7.2026). Fuer Hillshade bleibt
             # die Maske wie gehabt bestehen.
-            is_sb_dsm_raster = GDS == "SB_DSM" and "_hillshade_" not in fn.lower()
+            is_sb_dsm_raster = GDS == "SB_DSM" and not _datenpaket.is_hillshade(fn)
             is_hillshade = GDS == "SB_DSM" and not is_sb_dsm_raster
 
             if is_hillshade and rescale_hillshade_for_jpeg(fp):
@@ -1281,7 +1281,7 @@ if __name__ == "__main__":
             # kontrollieren! Typische Werte:
             # "0 0 0"    /   "255 255 255"   (8BIT, 3-Band RGB TIF)
             # Hinweis: Für GDS "SB_DSM" wird NoData automatisch gesetzt:
-            #   - '_hillshade_' im Dateinamen -> "255 255 255"
+            #   - Hillshade ('_hillshade_' oder ADS80 '..._HS') -> "255"
             #   - '_DSM_'       im Dateinamen -> "-3.4028235e+38"
             #   (dieser Wert wird dann ignoriert)
             # Hinweis: Für GDS "SB_DSM_PUNKTWOLKE" gibt es kein NoData-Value

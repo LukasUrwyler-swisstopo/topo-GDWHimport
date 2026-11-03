@@ -44,7 +44,7 @@ Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 |-----|-------------|--------------------|
 | `SB_DOP` | `.tif` / `.tfw` (8Bit RGB) | `202X_AREA_DOP_..._XXXX_YYYY_LV95.tif`; bei ADS80 auch OrthoVista-Kacheln `202X_AREA_DOP_..._LV95_<Kachel>.tif`, siehe [ADS80](#leica-ads80-dop-in-orthovista-kacheln) |
 | `SB_DOP_16` | `.tif` / `.tfw` (16Bit NRGB) | `202X_AREA_DOP_..._XXXX_YYYY_LV95.tif`; bei ADS80 wie SB_DOP |
-| `SB_DSM` | `.tif` / `.tfw` (DSM + Hillshade) | `202X_AREA_DSM_..._LV95_LN02.tif` bzw. `202X_AREA_hillshade_..._LV95_LN02.tif` |
+| `SB_DSM` | `.tif` / `.tfw` (DSM + Hillshade) | `202X_AREA_DSM_..._LV95_LN02.tif` bzw. `202X_AREA_hillshade_..._LV95_LN02.tif`; bei ADS80 auch weitere Namensteile nach `_LV95_LN02` (`202X_AREA_DSM_..._LV95_LN02_....tif`) bzw. Hillshade mit Endung `_HS` (z.B. `2016_SILVRETTA_DSM_1m_LV95_LN02_GG_wf_raw_HS.tif`) |
 | `SB_DSM_PUNKTWOLKE` | `.laz` (LAS 1.4, PF6 bzw. PF7 mit RGB bei DMC-4); bei ADS80 auch ASCII `.asc` / `.xyz` / `.ascii`, siehe [ADS80](#leica-ads80-ascii-punktwolke) | `202X_AREA_TIN_..._XXXX_YYYY_LV95_LN02.laz` bzw. `202X_AREA_DSM_....asc` |
 
 > `XXXX_YYYY` = TileKey (z.B. `2601_1136`). `_LV95` muss im Dateinamen enthalten sein. Das GUI zeigt den TileKey der ersten Datei als Vorschau (mit Warnhinweis, wenn er nicht passt); der Button **Check - NameFormat** prüft alle Dateinamen im Quellordner.
@@ -95,7 +95,7 @@ Der **Import-Button** bleibt gesperrt, bis alle Pflichtfelder ausgefüllt sind.
 | `CustomAttribute` | Beschreibung des Datenprodukts (automatisch je GDS und CameraSystem) |
 | `Line_ID(s)` | Befliegungslinien – werden automatisch chronologisch sortiert; mehrere Zeilen per Copy/Paste aus Excel möglich. Format je CameraSystem, siehe [LineIDs bei DMC-4](#lineids-bei-dmc-4) |
 
-> Bei `SB_DSM` wird NoData automatisch gesetzt, bei `SB_DSM_PUNKTWOLKE` entfällt es ganz. Bei `SB_DOP` mit `Leica DMC-4` ist es fix `0 0 0 0` (4-Band RGBN).
+> Bei `SB_DSM` wird NoData automatisch gesetzt, bei `SB_DSM_PUNKTWOLKE` entfällt es ganz. Bei `SB_DOP` mit `Leica DMC-4` ist es fix `0 0 0 0` (4-Band RGBN). Bei `SB_DOP` / `SB_DOP_16` mit `Leica ADS80` ist weiss vorausgewählt (`255 255 255` bzw. `65535 65535 65535 65535`), im Dropdown änderbar.
 
 ---
 
@@ -178,7 +178,7 @@ ohne Flag Mask korrekt dargestellt wird.
 > drei Bänder, überspringt Script 1 Tag und Maske stillschweigend (nur Log-Warnung). Das Log
 > nach dem Lauf prüfen, wenn der Bestand nicht sicher 4-Band ist.
 
-Bei ADS (ADS100 / ADS80) gilt: NoData frei wählbar, Vorkorrektur optional, TerrainModel frei wählbar, Punktwolken immer PF6. Enthält eine Punktwolken-Kachel trotzdem RGB-Werte, bricht der Import ab – ADS liefert nie Farbe, das `CameraSystem` ist dann vermutlich falsch gewählt. `SB_DOP_16` (ADS-Einzellinien) ist von beidem nicht betroffen.
+Bei ADS (ADS100 / ADS80) gilt: NoData frei wählbar (Vorauswahl ADS100 schwarz, ADS80 weiss), Vorkorrektur optional, TerrainModel frei wählbar, Punktwolken immer PF6. Enthält eine Punktwolken-Kachel trotzdem RGB-Werte, bricht der Import ab – ADS liefert nie Farbe, das `CameraSystem` ist dann vermutlich falsch gewählt. `SB_DOP_16` (ADS-Einzellinien) ist von beidem nicht betroffen.
 
 ## Leica ADS80: ASCII-Punktwolke
 
@@ -225,7 +225,7 @@ Vereinzelte Pixel/kleine Gruppen, die zufällig dem NoData-Wert entsprechen (z.B
 Bringt die Punktwolken-Kacheln (LAZ) vor dem Import ins GDWH-Format: LAS 1.4, PF6 (bzw. PF7 mit Farbe bei DMC-4, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln)), Scale 0.01, Offset = Kachelursprung, CRS `EPSG:2056+5728` – strukturell kongruent zu swissSURFACE3D. Das CRS wird byte-exakt aus einer verifizierten Referenzkachel injiziert (keine Reprojektion, keine Neuberechnung des WKT). Typischer Fall sind ADS-Kacheln in LAS 1.2/PF1 ohne CRS-Angabe; Kacheln, die schon im Zielformat vorliegen (z.B. die fertigen `…_LV95_LN02.laz` aus dem DMC-Converter), werden nur kopiert. Läuft automatisch auf einer Arbeitskopie; die Quellkacheln bleiben unverändert. **CRS der Quelle** wird vorher geprüft, analog zum DSM-TIFF: ohne CRS, `EPSG:2056` oder `EPSG:2056+5728` geht es weiter. Ein Höhenbezug **LHN95** (`EPSG:5729`) oder ein anderer als LN02 sowie ein horizontales CRS ausser LV95 **blockieren** die Kachel, und der Import bricht ab, bevor Script 1 startet. Sonst würden die Referenz-Einträge LHN95-Höhen stillschweigend als LN02 ausweisen, denn es gibt keine Reprojektion. Details siehe [4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py](processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py).
 
 **CRS-Tag im TIFF** *(SB_DSM, SB_DOP, SB_DOP_16, alle CameraSysteme, immer aktiv, keine Checkbox)*
-Vor der XML-Erzeugung wird das CRS aller TIFF gelesen (nur Header). Soll: `SB_DSM`-DSM `EPSG:2056+5728` (LV95 + LN02, als GeoTIFF 1.1 mit VerticalGeoKey, OGC 19-008r4), `SB_DSM`-Hillshade (`_hillshade_` im Dateinamen, reine Darstellung), `SB_DOP` und `SB_DOP_16` `EPSG:2056`. Fehlt das CRS (Koordinaten müssen in LV95 liegen) oder fehlt/stört der Höhenbezug, wird nur der Tag geschrieben – Pixel und Geotransformation bleiben unverändert. Widerspricht eine Kachel dem Soll (z.B. LV03, oder LHN95 bei SB_DSM), bricht der Import ab, **bevor** eine Datei verändert wird. Lässt sich LN02 nicht ins TIFF schreiben (GDAL ohne GeoTIFF 1.1), gibt es nur eine Warnung. Die Logik liegt in [`processingScripts/_tiff_crs.py`](processingScripts/_tiff_crs.py) (gemeinsam für Script 1, Script 2_2 und GUI).
+Vor der XML-Erzeugung wird das CRS aller TIFF gelesen (nur Header). Soll: `SB_DSM`-DSM `EPSG:2056+5728` (LV95 + LN02, als GeoTIFF 1.1 mit VerticalGeoKey, OGC 19-008r4), `SB_DSM`-Hillshade (`_hillshade_` oder Endung `_HS` im Dateinamen, reine Darstellung), `SB_DOP` und `SB_DOP_16` `EPSG:2056`. Fehlt das CRS (Koordinaten müssen in LV95 liegen) oder fehlt/stört der Höhenbezug, wird nur der Tag geschrieben – Pixel und Geotransformation bleiben unverändert. Widerspricht eine Kachel dem Soll (z.B. LV03, oder LHN95 bei SB_DSM), bricht der Import ab, **bevor** eine Datei verändert wird. Lässt sich LN02 nicht ins TIFF schreiben (GDAL ohne GeoTIFF 1.1), gibt es nur eine Warnung. Die Logik liegt in [`processingScripts/_tiff_crs.py`](processingScripts/_tiff_crs.py) (gemeinsam für Script 1, Script 2_2 und GUI).
 
 Bei **DOPs** (Input ohne Tag ist erlaubt) prüft das GUI die Tags schon **vor dem Sicherheitscheck** (im Hintergrund über OSGeo4W-Python, nur lesend):
 
