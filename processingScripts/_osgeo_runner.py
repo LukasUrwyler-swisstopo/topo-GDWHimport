@@ -358,7 +358,8 @@ def _cleanup_staging(job_dir):
 RGB_CAMERA_SYSTEMS = ("Leica DMC-4",)
 
 
-def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir, keep_rgb=False):
+def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir, keep_rgb=False,
+                              gap_warn_m=None):
     """Fuehrt die LAS 1.2 -> LAS 1.4 Batch-Vorkonversion aus (siehe
     convert_folder() in Script 4). Bricht den ganzen Lauf per Exception ab,
     wenn auch nur eine Kachel fehlschlaegt - eine nicht korrekt konvertierte
@@ -372,10 +373,16 @@ def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir, keep_r
     staging_root_dir (i.d.R. job_dir - selbe schnelle lokale Platte wie die
     gestagte Quelle), falls vorhanden, sonst im System-Temp.
 
+    gap_warn_m: Randabstand, ab dem Script 4 eine Datenluecke meldet - None =
+    Standard von Script 4, groesser bei Kacheln aus einem Raster-DSM (siehe
+    ASCII_GAP_WARN_M).
+
     Gibt den Pfad zum Scratch-Ordner zurueck (muss vom Aufrufer nach
     Gebrauch aufgeraeumt werden, siehe _cleanup_staging-Analogie in main()).
     """
     mod4 = _lade_modul("script_4", script4_path)
+    if gap_warn_m is None:
+        gap_warn_m = mod4.TILE_FRAME_EPS_M
     scratch_dir = tempfile.mkdtemp(prefix="SB_DSM_PUNKTWOLKE_LAS14_", dir=(staging_root_dir or None))
 
     print("\n=== LAS 1.2 -> LAS 1.4 Vorkonversion (Script 4) ===\n", flush=True)
@@ -383,7 +390,8 @@ def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir, keep_r
                             if keep_rgb else "PF6 (RGB-Werte in einer Kachel = Abbruch)") + "\n",
           flush=True)
     summary = mod4.convert_folder(quelle_dir, scratch_dir, recursive=False,
-                                   target_scale=0.01, dry_run=False, keep_rgb=keep_rgb)
+                                   target_scale=0.01, dry_run=False, keep_rgb=keep_rgb,
+                                   gap_warn_m=gap_warn_m)
     print(f"\nLAS14-Vorkonversion: {summary['total']} verarbeitet, {summary['ok']} gueltig, "
           f"{summary['warning']} mit Warnung, {summary['skipped']} bereits migriert, "
           f"{summary['failed']} fehlgeschlagen; davon PF7 mit RGB: {summary['pf7']}\n", flush=True)
@@ -395,6 +403,87 @@ def _convert_punktwolke_las14(script4_path, quelle_dir, staging_root_dir, keep_r
         )
 
     return scratch_dir
+
+
+# ---------------------------------------------------------------------------
+# SB_DSM_PUNKTWOLKE mit Leica ADS80: ASCII -> 1-km-LAZ-Kacheln (Script 5)
+# ---------------------------------------------------------------------------
+# ADS80 liefert die Punktwolke als ASCII pro Gebiet statt in 1-km-LAZ-Kacheln.
+# Script 5 schneidet sie per Grid-Shape zu Kacheln, die danach wie jede andere
+# Lieferung durch Script 4 (Zielformat, CRS-VLRs) und Script 1 laufen. Die
+# Quelle wird nie veraendert. Wert wie in CAMERA_SYSTEMS der GUI.
+ASCII_CAMERA_SYSTEMS = ("Leica ADS80",)
+# Raster-DSM: Punkte auf den Zellmitten (bzw. versetzt), bis zu einer Zellbreite
+# Abstand zum km-Rand ist keine Datenluecke - sonst meldet Script 4 jede Kachel
+ASCII_GAP_WARN_M = 1.0
+
+
+def _convert_punktwolke_ascii(script5_path, quelle_dir, staging_root_dir, grid_shape, meta):
+    """ASCII im Quellordner -> LAZ-Kacheln in einem Scratch-Ordner (innerhalb
+    staging_root_dir, sonst System-Temp). Nur fuer CameraSystem in
+    ASCII_CAMERA_SYSTEMS aufrufen - bei allen anderen bleibt alles wie bisher.
+    Gibt (scratch_dir, kachel_ordner) zurueck oder None, wenn keine ASCII-Datei
+    da ist (dann LAZ-Kacheln wie bei ADS100). Bricht ab bei ASCII und LAZ im
+    selben Ordner."""
+    mod5 = _lade_modul("script_5", script5_path)
+    ascii_files = mod5.find_ascii_files(quelle_dir)
+    if not ascii_files:
+        return None
+    laz = [f for f in os.listdir(quelle_dir) if f.lower().endswith(".laz")]
+    if laz:
+        raise ValueError(f"Quellordner enthaelt ASCII ({len(ascii_files)}) UND LAZ ({len(laz)}) - "
+                         "unklar, welche Variante importiert werden soll. Nur eine davon in den "
+                         "Quellordner legen.")
+    line_ids = meta.get("Line_ID") or [""]
+    jahr = line_ids[0][0:4]
+    area = (meta.get("AreaOverride") or "").strip()
+
+    scratch_dir = tempfile.mkdtemp(prefix="SB_DSM_PUNKTWOLKE_ASCII_", dir=(staging_root_dir or None))
+    print("\n=== ADS80: ASCII -> LAZ-Kacheln 1 km2 (Script 5) ===\n", flush=True)
+    try:
+        tiles_dir = os.path.join(scratch_dir, "tiles")
+        mod5.convert_folder(quelle_dir, tiles_dir, grid_shape, jahr, area,
+                            os.path.join(scratch_dir, "w"))
+    except Exception:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        raise
+    shutil.rmtree(os.path.join(scratch_dir, "w"), ignore_errors=True)  # Zwischendateien
+    print("", flush=True)
+    return scratch_dir, tiles_dir
+
+
+# ---------------------------------------------------------------------------
+# SB_DOP / SB_DOP_16 mit Leica ADS80: OrthoVista-Kacheln -> 1-km-Grid (Script 6)
+# ---------------------------------------------------------------------------
+# ADS80-DOPs liegen in beliebig grossen OrthoVista-Kacheln statt auf dem
+# 1-km-Grid. Script 6 schneidet sie pixelgenau auf das Grid-Shape; danach laeuft
+# alles wie bei ADS100 (Script 3/1 bzw. 2_2), und zwar auf den neuen Kacheln im
+# Scratch-Ordner - die Quelle wird nie veraendert. Wert wie in CAMERA_SYSTEMS der GUI.
+RETILE_CAMERA_SYSTEMS = ("Leica ADS80",)
+
+
+def _retile_dop(script6_path, quelle_dir, staging_root_dir, grid_shape, meta):
+    """DOP-Kacheln im Quellordner -> 1-km-Kacheln in einem Scratch-Ordner
+    (innerhalb staging_root_dir, sonst System-Temp). Gibt (scratch_dir,
+    kachel_ordner) zurueck oder None, wenn die Kacheln schon auf dem Grid
+    liegen. Bei SB_DOP_16 ist quelle_dir bereits der Ordner EINER Linie
+    (Script 2_1) - Linien werden nie zusammen mosaikiert."""
+    mod6 = _lade_modul("script_6", script6_path)
+    scratch_dir = tempfile.mkdtemp(prefix="SB_DOP_ADS80_GRID_", dir=(staging_root_dir or None))
+    print("\n=== ADS80: DOP-Kacheln -> 1-km-Grid (Script 6) ===\n", flush=True)
+    try:
+        tiles_dir = os.path.join(scratch_dir, "tiles")
+        written = mod6.retile_folder(quelle_dir, tiles_dir, grid_shape, meta.get("NoData", ""),
+                                     os.path.join(scratch_dir, "w"))
+    except Exception:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        raise
+    if written is None:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        return None
+    shutil.rmtree(os.path.join(scratch_dir, "w"), ignore_errors=True)  # VRT
+    print("", flush=True)
+    return scratch_dir, tiles_dir
 
 
 def main():
@@ -421,6 +510,8 @@ def main():
     job_dir = None
     staged = False
     punktwolke_scratch_dir = None
+    ascii_scratch_dir = None
+    retile_scratch_dir = None
 
     if staging_root and ziel and os.path.isdir(os.path.splitdrive(staging_root)[0] + "\\"):
         try:
@@ -440,10 +531,26 @@ def main():
             # vorschau sieht - proc_quelle wird danach auf den Scratch-Ordner
             # mit den konvertierten Tiles umgebogen.
             if gds == "SB_DSM_PUNKTWOLKE":
+                # ADS80: ASCII zuerst in 1-km-LAZ-Kacheln (Script 5), die dann
+                # wie jede LAZ-Lieferung durch Script 4 gehen
+                if meta.get("CameraSystem") in ASCII_CAMERA_SYSTEMS:
+                    ascii_result = _convert_punktwolke_ascii(
+                        cfg["script_5"], proc_quelle, job_dir, cfg["grid_shape"], meta)
+                    if ascii_result:
+                        ascii_scratch_dir, proc_quelle = ascii_result
                 punktwolke_scratch_dir = _convert_punktwolke_las14(
                     cfg["script_4"], proc_quelle, job_dir,
-                    keep_rgb=meta.get("CameraSystem") in RGB_CAMERA_SYSTEMS)
+                    keep_rgb=meta.get("CameraSystem") in RGB_CAMERA_SYSTEMS,
+                    gap_warn_m=ASCII_GAP_WARN_M if ascii_scratch_dir else None)
                 proc_quelle = punktwolke_scratch_dir
+
+            # ADS80: OrthoVista-Kacheln zuerst auf das 1-km-Grid (Script 6),
+            # Vorkorrektur und Script 1 laufen dann auf den neuen Kacheln
+            if gds == "SB_DOP" and meta.get("CameraSystem") in RETILE_CAMERA_SYSTEMS:
+                retile_result = _retile_dop(cfg["script_6"], proc_quelle, job_dir,
+                                            cfg["grid_shape"], meta)
+                if retile_result:
+                    retile_scratch_dir, proc_quelle = retile_result
 
             # Script 1 (SB_DOP / SB_DSM / SB_DSM_PUNKTWOLKE)
             mod = _lade_modul("script_1", cfg["script_1"])
@@ -468,6 +575,12 @@ def main():
             if meta.get("CameraSystem") in RGB_CAMERA_SYSTEMS:
                 raise ValueError("SB_DOP_16 ist mit CameraSystem "
                                  f"'{meta.get('CameraSystem')}' nicht moeglich - Import abgebrochen.")
+            # ADS80: Kacheln der Linie (Unterordner aus Script 2_1) auf das 1-km-Grid
+            if meta.get("CameraSystem") in RETILE_CAMERA_SYSTEMS:
+                retile_result = _retile_dop(cfg["script_6"], proc_quelle, job_dir,
+                                            cfg["grid_shape"], meta)
+                if retile_result:
+                    retile_scratch_dir, proc_quelle = retile_result
             # Script 2_2 (SB_DOP_16)
             mod = _lade_modul("script_22", cfg["script_22"])
             print("=== Sicherheitsvorschau ===", flush=True)
@@ -520,6 +633,10 @@ def main():
     # er ggf. bereits durch _cleanup_staging() oben entfernt.
     if punktwolke_scratch_dir:
         shutil.rmtree(punktwolke_scratch_dir, ignore_errors=True)
+    if ascii_scratch_dir:
+        shutil.rmtree(ascii_scratch_dir, ignore_errors=True)
+    if retile_scratch_dir:
+        shutil.rmtree(retile_scratch_dir, ignore_errors=True)
 
     sys.exit(exit_code)
 

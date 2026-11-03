@@ -20,6 +20,10 @@ SCRIPT_21   = os.path.join(PROCESSING_DIR, "2_1_SB_DOP_16_FOLDERorganize_by_line
 SCRIPT_22   = os.path.join(PROCESSING_DIR, "2_2_SB_DOP_16_GDS_upload_GDWH_withCHECKxml.py")
 SCRIPT_3    = os.path.join(PROCESSING_DIR, "3_fix_false_nodata_dop.py")
 SCRIPT_4    = os.path.join(PROCESSING_DIR, "4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py")
+SCRIPT_5    = os.path.join(PROCESSING_DIR, "5_SB_DSM_PUNKTWOLKE_ASCIItoLAZtiles.py")
+SCRIPT_6    = os.path.join(PROCESSING_DIR, "6_SB_DOP_ADS80_TILEStoGRID1km.py")
+# Grid fuer ADS80 -> 1-km-Kacheln (Script 5 Punktwolke, Script 6 DOP), TileKey = Feld NAME
+GRID_SHAPE_1KM = os.path.join(SCRIPT_DIR, "swissGRID_1km2_shp", "chGRID_1km2.shp")
 RUNNER_SCRIPT = os.path.join(PROCESSING_DIR, "_osgeo_runner.py")
 SCRIPT_PREVIEW = os.path.join(PROCESSING_DIR, "_tif_preview_reader.py")
 SCRIPT_TIFF_CRS = os.path.join(PROCESSING_DIR, "_tiff_crs.py")
@@ -33,6 +37,8 @@ if PROCESSING_DIR not in sys.path:
 import _line_ids
 # Ordnerstruktur des GDWH-Datenpakets - gemeinsames Modul mit Script 1
 import _datenpaket
+# STAC-Pruefung vor dem Start: bestehendes Asset des GDS sperrt den Import
+import _stac_check
 
 # ─── Auswahllisten ────────────────────────────────────────────────────────────
 GDS_ITEMS = [
@@ -74,13 +80,19 @@ def _catalog_gds(gds, camera):
     return gds
 
 
+def _is_int_bucket(ziel):
+    """True bei '...\\BUCKET_INT\\...' im Zielpfad - INT-Umgebung fuer
+    GDWH-Portal und STAC-Pruefung."""
+    parts = [p for p in (ziel or "").replace("/", "\\").split("\\") if p]
+    return "BUCKET_INT" in parts
+
+
 def _catalog_link(gds, ziel):
     """Baut den GDWH-Catalog-Import-Link fuer gds (Catalog-Name, siehe _catalog_gds),
     je nach BUCKET/BUCKET_INT im Zielpfad."""
     if gds not in CATALOG_GDS_TYPES:
         return ""
-    parts = [p for p in (ziel or "").replace("/", "\\").split("\\") if p]
-    host = CATALOG_HOST_INT if "BUCKET_INT" in parts else CATALOG_HOST_PROD
+    host = CATALOG_HOST_INT if _is_int_bucket(ziel) else CATALOG_HOST_PROD
     return f"https://{host}/catalog-ng/catalog/{gds}/import"
 
 # Auftragstyp: Code (geht in XML/STAC-Link) -> Anzeigetext im Dropdown
@@ -97,6 +109,14 @@ TERRAIN_MODELS = [
     "swissALTI3D", "swissALTI3D/DHM25", "swissSURFACE3D",
 ]
 CAMERA_SYSTEMS = ["Leica ADS100", "Leica ADS80", "Leica DMC-4"]
+# Leica ADS80 liefert nicht in 1-km-Kacheln: SB_DSM_PUNKTWOLKE als ASCII pro
+# Gebiet (Script 5, Endungen wie dort ASCII_EXTENSIONS), SB_DOP / SB_DOP_16 in
+# OrthoVista-Kacheln ..._LV95_<Kachel>.tif (Script 6). Beides wird beim Import
+# auf das 1-km-Grid gebracht, bei allen anderen CameraSystemen bleibt alles gleich.
+ADS80_CAMERA         = "Leica ADS80"
+PUNKTWOLKE_ASCII_EXT = (".asc", ".ascii", ".xyz")
+# Beginn der TileKey-Vorschau, wenn der TileKey erst beim Import aus dem Grid kommt
+GRID_TILEKEY_HINT    = "aus swissGRID 1 km² (NAME)"
 # DMC-4: SB_DOP-NoData fix '0 0 0 0' ohne Vorkorrektur (siehe _update_camera_nodata_rules),
 # Punktwolken immer PF7 mit RGB (siehe Script 4 / _osgeo_runner.RGB_CAMERA_SYSTEMS),
 # TerrainModel/CustomAttribute/SB_DOP_16 siehe _update_camera_meta_rules
@@ -146,6 +166,26 @@ NAME_FORMAT_SPECS = {
         "extensions": (".laz",),
         "regexes": [re.compile(r'^20\d{2}_.+_TIN_.*\d{4}_\d{4}_LV95_LN02\.laz$', re.IGNORECASE)],
         "example":  "202X_AREANAME_TIN_..._XXXX_YYYY_LV95_LN02.laz",
+    },
+}
+# Leica ADS80: zusaetzlich die Lieferform vor dem Zuschnitt auf das 1-km-Grid
+_DOP_SPEC_ADS80 = {
+    "extensions": NAME_FORMAT_SPECS["SB_DOP"]["extensions"],
+    "regexes": NAME_FORMAT_SPECS["SB_DOP"]["regexes"]
+               + [re.compile(r'^20\d{2}_.+_DOP_.*_LV95_.+\.(tif|tiff|tfw)$', re.IGNORECASE)],
+    "example":  "202X_AREANAME_DOP_..._XXXX_YYYY_LV95.tif  oder  "
+                "202X_AREANAME_DOP_..._LV95_<Kachel>.tif (ADS80, wird auf das 1-km-Grid geschnitten)",
+}
+NAME_FORMAT_SPECS_ADS80 = {
+    "SB_DOP":    _DOP_SPEC_ADS80,
+    "SB_DOP_16": _DOP_SPEC_ADS80,
+    # Punktwolke: ASCII (Area zwischen Jahr und _DSM/_TIN)
+    "SB_DSM_PUNKTWOLKE": {
+        "extensions": (".laz",) + PUNKTWOLKE_ASCII_EXT,
+        "regexes": NAME_FORMAT_SPECS["SB_DSM_PUNKTWOLKE"]["regexes"]
+                   + [re.compile(r'^20\d{2}_.+?_(DSM|TIN)_.*\.(asc|ascii|xyz)$', re.IGNORECASE)],
+        "example":  "202X_AREANAME_TIN_..._XXXX_YYYY_LV95_LN02.laz  oder  "
+                    "202X_AREANAME_DSM_....asc / .xyz / .ascii (ADS80, wird in 1-km²-LAZ-Kacheln umgerechnet)",
     },
 }
 
@@ -557,9 +597,14 @@ class SicherheitsCheckDialog(tk.Toplevel):
     }
 
     def __init__(self, parent, gds, meta, quelle, ziel, area="", stac_dt="",
-                 tilekey="", tilekey_file="", dark=True):
+                 tilekey="", tilekey_file="", stac=None, queue_res=None, dark=True):
         super().__init__(parent)
         self.result = False
+        # Ergebnisse von _stac_check.check_asset / check_queue - ein bestehendes
+        # Asset oder ein wartendes Paket mit Konflikt sperrt den Import-Button
+        stac, queue_res = stac or {}, queue_res or {}
+        self._stac_blocked = (stac.get("status") == "exists"
+                              or queue_res.get("status") == "conflict")
         self._dark = dark
         T   = DARK if dark else LIGHT
         box = self._BOX_DARK if dark else self._BOX_LIGHT
@@ -665,7 +710,7 @@ class SicherheitsCheckDialog(tk.Toplevel):
         _kv(sec1, "GDS:", gds)
         _kv(sec1, "Area:", area)
         _kv(sec1, "TileKey (1. Tile):", f"{tilekey}   (aus: {tilekey_file})")
-        _kv(sec1, "STAC ITEM - Name:", stac_dt)
+        _kv(sec1, "STAC ITEM - Name:", stac.get("item") or stac_dt)
         _kv(sec1, "Auftragstyp:", meta.get("Auftragstyp", ""))
         _kv(sec1, "CustomAttribute:", meta.get("CustomAttribute", ""))
         # Die Line_IDs gehen bei beiden Kamerasystemen unveraendert ins XML
@@ -706,6 +751,20 @@ class SicherheitsCheckDialog(tk.Toplevel):
         elif gds in DOP_GDS:
             _kv(sec1, "TIFF-CRS:", "EPSG:2056 (LV95, ohne Höhenbezug) – wurde vorgeprüft, "
                                    "wird bei Bedarf gesetzt")
+        if (gds in DOP_GDS and meta.get("CameraSystem") == ADS80_CAMERA
+                and str(tilekey).startswith(GRID_TILEKEY_HINT)):
+            _kv(sec1, "ADS80 -> 1-km-Grid:",
+                "Die OrthoVista-Kacheln werden zu einem virtuellen Mosaik zusammengesetzt und je "
+                "swissGRID-Zelle pixelgenau geschnitten: <Name vor _LV95>_<NAME>_LV95.tif (+ .tfw)"
+                + (", pro Linie" if gds == "SB_DOP_16" else "")
+                + ". Hintergrund = Input NoData, Kacheln nur aus NoData werden weggelassen. "
+                  "Die Quelle bleibt unverändert.")
+        if (gds == "SB_DSM_PUNKTWOLKE" and meta.get("CameraSystem") == ADS80_CAMERA
+                and tilekey_file.lower().endswith(PUNKTWOLKE_ASCII_EXT)):
+            _kv(sec1, "ADS80 ASCII -> LAZ:",
+                "ASCII-Punktwolke (ESRI-Grid oder XYZ) wird per swissGRID 1 km² in LAZ-Kacheln "
+                "umgerechnet: <Jahr>_<Area>_TIN_DSM_<NAME>_LV95_LN02.laz (Jahr aus der Line_ID, "
+                "NODATA-Zellen verworfen). Die Quelle bleibt unverändert.")
         if gds == "SB_DSM_PUNKTWOLKE":
             _kv(sec1, "LAS 1.2 -> 1.4 Vorkonversion:",
                 "immer aktiv (CRS-Tag EPSG:2056+5728 wird byte-exakt gesetzt, siehe Log)")
@@ -724,6 +783,87 @@ class SicherheitsCheckDialog(tk.Toplevel):
         else:
             _path_block(sec2, "Quelle:", quelle)
         _path_block(sec2, "Ziel:", ziel)
+
+        def _status_box(parent, kind, text):
+            bg_s, fg_s = box[kind]
+            tk.Label(parent, text=text,
+                     font=("Segoe UI", 9, "bold"),
+                     bg=bg_s, fg=fg_s, anchor="w", justify="left",
+                     wraplength=580, padx=10, pady=8).pack(fill="x", pady=(0, 4))
+
+        # STAC-Pruefung: existiert das Asset dieses GDS schon im Item, oder
+        # wartet im Bucket ein Datenpaket, das dasselbe Asset erzeugt? Nur das
+        # sperrt - ein Item, das von anderen GDS ergaenzt wird, ist ein Hinweis.
+        stac_questions = []
+        if stac:
+            sec_stac = _section(f"STAC-PRÜFUNG  ({stac.get('env', '')})  –  "
+                                "STAC-ITEM UND WARTESCHLANGE IM BUCKET")
+            item, status = stac.get("item", ""), stac.get("status")
+            conflict = ", ".join(stac.get("conflict", []))
+            vorhanden = ", ".join(a[len(item) + 1:] if a.startswith(item + "-") else a
+                                  for a in stac.get("assets", [])) or "–"
+            updated = stac.get("updated", "")
+            updated = f"{updated[:16].replace('T', ' ')} UTC" if updated else "unbekannt"
+            if status == "new":
+                kind = "ok"
+                text = f"✓  Item '{item}' existiert noch nicht – wird beim Import neu erstellt."
+            elif status == "free":
+                kind = "warn"
+                text = (f"⚠  Item '{item}' existiert bereits (zuletzt aktualisiert {updated}).\n"
+                        f"Vorhandene Assets: {vorhanden}\n"
+                        f"Das Asset dieses GDS fehlt noch – der Import ergänzt das Item.")
+            elif status == "exists":
+                kind = "err"
+                text = (f"✗  Asset existiert bereits im Item '{item}':  {conflict}\n"
+                        "Ein Import würde die Daten in GDWH und STAC überschreiben – "
+                        "Import gesperrt.\n"
+                        "Für einen Re-Import das Asset zuerst manuell aus dem Item löschen. "
+                        "Stammt das Datenpaket von einer anderen Area, müssen "
+                        "StacItemIdDatetime und BandID angepasst werden.")
+            else:
+                kind = "err"
+                text = f"✗  STAC-Prüfung nicht möglich:  {stac.get('error', '')}"
+                stac_questions.append(
+                    f"Ist ohne STAC-Prüfung sichergestellt, dass im Item '{item}' noch kein "
+                    "Asset dieses GDS existiert? Sonst würden die Daten in GDWH und STAC "
+                    "überschrieben.")
+            _status_box(sec_stac, kind, text)
+
+            if queue_res:
+                hits = queue_res.get("hits", [])
+                liste = "\n".join(
+                    f"  {h['catalog']}\\{h['paket']}   (Area {h['area'] or '?'})  –  "
+                    + ("gleiches Asset" if h["conflict"] else "anderes Asset")
+                    for h in hits)
+                n = queue_res.get("checked", 0)
+                if queue_res.get("status") == "conflict":
+                    kind = "err"
+                    text = (f"✗  Im Bucket wartet ein Datenpaket desselben GDS mit dem Item "
+                            f"'{item}':\n{liste}\n"
+                            "Nach dem GDWH-Import beider Pakete wäre das Asset in GDWH und STAC "
+                            "überschrieben – Import gesperrt.\n"
+                            "Gehört das wartende Paket zu einer anderen Area, müssen "
+                            "StacItemIdDatetime und BandID angepasst werden.")
+                elif queue_res.get("status") == "ok" and hits:
+                    kind = "warn"
+                    text = (f"⚠  Warteschlange im Bucket: {n} Datenpaket(e) geprüft. Mit "
+                            "demselben Item warten Pakete anderer GDS – sie ergänzen das "
+                            f"Item, kein Konflikt:\n{liste}")
+                elif queue_res.get("status") == "ok":
+                    kind = "ok"
+                    text = (f"✓  Warteschlange im Bucket: {n} Datenpaket(e) geprüft – "
+                            "keines mit diesem Item.")
+                else:
+                    kind = "err"
+                    text = f"✗  Warteschlange im Bucket nicht prüfbar:  {queue_res.get('error', '')}"
+                    stac_questions.append(
+                        "Ist ohne Prüfung der Warteschlange sichergestellt, dass kein "
+                        f"wartendes Datenpaket im Bucket dasselbe Item '{item}' hat?")
+                if queue_res.get("unreadable"):
+                    kind = "warn" if kind == "ok" else kind
+                    text += ("\n⚠  Nicht lesbar, nicht geprüft:\n"
+                             + "\n".join(f"  {u}" for u in queue_res["unreadable"]))
+                _status_box(sec_stac, kind, text)
 
         # Kontrollfragen durch Nutzer – GDS-spezifisch
         sec3 = _section("KONTROLLFRAGEN  –  NUTZERBESTÄTIGUNG ERFORDERLICH")
@@ -759,6 +899,7 @@ class SicherheitsCheckDialog(tk.Toplevel):
             check_questions = [
                 f"Ist der Inputpfad im korrekten Referenzsystem?   ({expected_crs})",
             ]
+        check_questions.extend(stac_questions)
 
         chk_box = tk.Frame(sec3, bg=bg_c, padx=12, pady=10)
         chk_box.pack(fill="x", pady=(0, 4))
@@ -853,7 +994,7 @@ class SicherheitsCheckDialog(tk.Toplevel):
         self.destroy()
 
     def _on_crs_toggle(self):
-        if all(v.get() for v in self._check_vars):
+        if not self._stac_blocked and all(v.get() for v in self._check_vars):
             self._import_btn.config(
                 state="normal",
                 bg="#005fa3" if self._dark else "#0063b1",
@@ -1961,6 +2102,13 @@ class GDWHApp(tk.Tk):
         self._update_camera_nodata_rules()
         removed = self.lineid_w.refresh_camera()
         self._update_camera_meta_rules()
+        # ADS80: ASCII zaehlt bei SB_DSM_PUNKTWOLKE als Input (Area/TileKey), bei
+        # SB_DOP/_16 kommt der TileKey aus dem Grid. Die Area nur dort neu ableiten,
+        # wo sie vom CameraSystem abhaengt - sonst bliebe eine Korrektur stehen.
+        if self.gds_var.get() == "SB_DSM_PUNKTWOLKE":
+            self._refresh_area_tilekey_preview()
+        elif self.gds_var.get() in DOP_GDS:
+            self._refresh_area_tilekey_preview(update_area=False)
         if removed:
             messagebox.showwarning(
                 "Line_IDs entfernt",
@@ -2086,10 +2234,11 @@ class GDWHApp(tk.Tk):
     # ── Area / TileKey Live-Vorschau ─────────────────────────────────────────
     _TILEKEY_RE = re.compile(r'^\d{4}_\d{4}$')
 
-    def _refresh_area_tilekey_preview(self):
+    def _refresh_area_tilekey_preview(self, update_area=True):
         """Aktualisiert die Area-/TileKey-Vorschaufelder anhand der ersten
         passenden Datei im aktuellen Quellordner. Wird bei GDS-Wechsel und bei
-        Aenderung des Quellordner-Pfads aufgerufen (siehe _build_paths)."""
+        Aenderung des Quellordner-Pfads aufgerufen (siehe _build_paths), bei
+        CameraSystem-Wechsel ggf. nur der TileKey (update_area=False)."""
         if not hasattr(self, "area_var"):
             return  # Widgets noch nicht aufgebaut
 
@@ -2106,12 +2255,15 @@ class GDWHApp(tk.Tk):
             self.tilekey_hint.config(text="")
             return
 
-        self.area_var.set(self._extract_area_from_source(src, gds))
+        camera = self.camera_var.get()
+        if update_area:
+            self.area_var.set(self._extract_area_from_source(src, gds, camera))
 
-        tilekey, _fn = self._extract_tilekey_from_source(src, gds)
+        tilekey, _fn = self._extract_tilekey_from_source(src, gds, camera)
         self.tilekey_preview_var.set(tilekey)
 
-        if gds == "SB_DSM" or self._TILEKEY_RE.match(tilekey):
+        if (gds == "SB_DSM" or self._TILEKEY_RE.match(tilekey)
+                or tilekey.startswith(GRID_TILEKEY_HINT)):
             self.tilekey_preview_lbl.configure(foreground=T["fg"])
             self.tilekey_hint.config(text="")
         else:
@@ -2136,6 +2288,8 @@ class GDWHApp(tk.Tk):
         GDS-spezifische Namenskonvention (siehe NAME_FORMAT_SPECS)."""
         gds  = self.gds_var.get()
         spec = NAME_FORMAT_SPECS.get(gds)
+        if self.camera_var.get() == ADS80_CAMERA:
+            spec = NAME_FORMAT_SPECS_ADS80.get(gds, spec)
         src  = path_var.get().strip().strip('"')
 
         if not spec:
@@ -2334,6 +2488,23 @@ class GDWHApp(tk.Tk):
                 errors.append("Quelle fehlt.")
             elif not os.path.isdir(q):
                 errors.append(f"Quelle nicht gefunden oder nicht erreichbar:\n  {q}")
+            elif gds == "SB_DSM_PUNKTWOLKE" and self.camera_var.get() == ADS80_CAMERA:
+                # ADS80: ASCII ODER LAZ-Kacheln - beides zusammen ist unklar (Script 5)
+                try:
+                    exts = [os.path.splitext(f)[1].lower() for f in os.listdir(q)]
+                except OSError:
+                    exts = []
+                has_ascii = any(e in PUNKTWOLKE_ASCII_EXT for e in exts)
+                if ".laz" in exts and has_ascii:
+                    errors.append("Quelle enthält ASCII-Punktwolke UND LAZ-Kacheln – "
+                                  "nur eine Variante in den Quellordner legen.")
+                elif has_ascii and not os.path.isfile(GRID_SHAPE_1KM):
+                    errors.append(f"Grid-Shape für ASCII -> LAZ-Kacheln fehlt:\n  {GRID_SHAPE_1KM}")
+
+        # ADS80-DOP: Zuschnitt auf das 1-km-Grid (Script 6) braucht das Grid-Shape
+        if (gds in DOP_GDS and self.camera_var.get() == ADS80_CAMERA
+                and not os.path.isfile(GRID_SHAPE_1KM)):
+            errors.append(f"Grid-Shape für den Zuschnitt der ADS80-Kacheln fehlt:\n  {GRID_SHAPE_1KM}")
 
         ziel = self.ziel_var.get().strip().strip('"')
         if not ziel:
@@ -2626,18 +2797,30 @@ class GDWHApp(tk.Tk):
                 m = re.search(r'20\d{2}_(.+?)_DSM', filename, re.IGNORECASE)
         elif gds == "SB_DSM_PUNKTWOLKE":
             m = re.search(r'20\d{2}_(.+?)_TIN', filename, re.IGNORECASE)
+            # ADS80-ASCII (z.B. 2016_SILVRETTA_DSM_1m_..._raw.asc) hat kein _TIN -
+            # die daraus erzeugten Kacheln tragen die Area aus dem Feld "Area"
+            if not m and filename.lower().endswith(PUNKTWOLKE_ASCII_EXT):
+                m = re.search(r'20\d{2}_(.+?)_DSM', filename, re.IGNORECASE)
         else:
             m = None
         return m.group(1) if m else "UNKNOWN"
 
     @staticmethod
-    def _extract_area_from_source(src_folder, gds):
+    def _source_extensions(gds, camera):
+        """Endungen der Nutzdaten im Quellordner - bei SB_DSM_PUNKTWOLKE mit ADS80
+        zusaetzlich ASCII (siehe PUNKTWOLKE_ASCII_EXT)."""
+        if gds == "SB_DSM_PUNKTWOLKE" and camera == ADS80_CAMERA:
+            return ('.laz',) + PUNKTWOLKE_ASCII_EXT
+        return ('.tif', '.tiff', '.laz')
+
+    @staticmethod
+    def _extract_area_from_source(src_folder, gds, camera=""):
         """Area aus erstem passenden Dateinamen im Quellordner (inkl. 1 Unterebene).
 
         Für SB_DOP_16: src_folder = INPUT_FOLDER (Dateien evtl. noch nicht reorganisiert).
         Für andere GDS: src_folder = Data-Input Path.
         """
-        extensions = ('.tif', '.tiff', '.laz')
+        extensions = GDWHApp._source_extensions(gds, camera)
         if not os.path.isdir(src_folder):
             return "—  (Ordner nicht gefunden)"
         try:
@@ -2661,6 +2844,8 @@ class GDWHApp(tk.Tk):
         (zwei Namensteile direkt vor 'LV95', z.B. ..._2601_1136_LV95_LN02.laz -> '2601_1136')."""
         if gds == "SB_DSM":
             return "1000  (fix für SB_DSM)"
+        if gds == "SB_DSM_PUNKTWOLKE" and filename.lower().endswith(PUNKTWOLKE_ASCII_EXT):
+            return f"{GRID_TILEKEY_HINT}  – ADS80-ASCII wird in LAZ-Kacheln umgerechnet"
         parts = filename.rsplit('.', 1)[0].split('_')
         if "LV95" not in parts:
             return "NICHT GEFUNDEN – 'LV95' fehlt im Dateinamen!"
@@ -2670,26 +2855,35 @@ class GDWHApp(tk.Tk):
         return parts[idx - 2] + "_" + parts[idx - 1]
 
     @staticmethod
-    def _extract_tilekey_from_source(src_folder, gds):
+    def _extract_tilekey_from_source(src_folder, gds, camera=""):
         """TileKey aus erstem passenden Dateinamen im Quellordner (inkl. 1 Unterebene).
 
         Gibt (tilekey, dateiname) zurück, damit im Sicherheitscheck ersichtlich ist,
         aus welcher Datei der TileKey abgeleitet wurde (Kontrolle der Namenskonvention).
+        ADS80-DOP in OrthoVista-Kacheln (..._LV95_<Kachel>.tif): TileKey kommt erst
+        beim Zuschnitt aus dem Grid (Script 6).
         """
-        extensions = ('.tif', '.tiff', '.laz')
+        def _key(fn):
+            tilekey = GDWHApp._extract_tilekey_from_filename(fn, gds)
+            if (camera == ADS80_CAMERA and gds in DOP_GDS
+                    and not GDWHApp._TILEKEY_RE.match(tilekey)):
+                return f"{GRID_TILEKEY_HINT}  – ADS80-Kacheln werden auf das 1-km-Grid geschnitten"
+            return tilekey
+
+        extensions = GDWHApp._source_extensions(gds, camera)
         if not os.path.isdir(src_folder):
             return "—", "(Ordner nicht gefunden)"
         try:
             for fn in sorted(os.listdir(src_folder)):
                 if fn.lower().endswith(extensions):
-                    return GDWHApp._extract_tilekey_from_filename(fn, gds), fn
+                    return _key(fn), fn
             # Eine Ebene tiefer (SB_DOP_16 vor/nach Reorganisation)
             for sub in sorted(os.listdir(src_folder)):
                 sub_path = os.path.join(src_folder, sub)
                 if os.path.isdir(sub_path):
                     for fn in sorted(os.listdir(sub_path)):
                         if fn.lower().endswith(extensions):
-                            return GDWHApp._extract_tilekey_from_filename(fn, gds), fn
+                            return _key(fn), fn
         except Exception:
             pass
         return "—", "(keine passende Datei gefunden)"
@@ -2752,9 +2946,9 @@ class GDWHApp(tk.Tk):
                 return
 
         args = (gds, meta, quelle, quelle_display, ziel)
-        # Meldungen der CRS-Vorpruefung - erst nach dem Start ins Log (das wird
+        # Meldungen der CRS- und STAC-Vorpruefung - erst nach dem Start ins Log (das wird
         # beim Start geleert, die Logdatei erst dann geoeffnet)
-        self._crs_precheck_log = []
+        self._precheck_log = []
         if gds in DOP_GDS:
             # CRS-Tags der DOP-Kacheln vorab lesen (Hintergrund), weiter in _on_crs_precheck_done
             self._start_crs_precheck(gds, meta, quelle, args)
@@ -2762,16 +2956,85 @@ class GDWHApp(tk.Tk):
             self._start_import_confirmed(*args)
 
     def _start_import_confirmed(self, gds, meta, quelle, quelle_display, ziel):
-        """Zweiter Teil von _start_import: Sicherheitscheck und Start."""
-        # Sicherheitscheck
+        """Zweiter Teil von _start_import: STAC-Pruefung im Hintergrund (PROD/INT
+        je nach Zielpfad), weiter mit Sicherheitscheck und Start in _on_stac_check_done."""
         # StacItemIdDatetime der ersten Linie - dieselbe Regel wie das XML (Script 1)
         stac_dt = _line_ids.stac_datetime(meta.get("Line_ID", []), meta.get("CameraSystem", ""))
-        _tilekey, _tilekey_file = self._extract_tilekey_from_source(quelle, gds)
+        item    = _stac_check.item_id(meta.get("Auftragstyp", ""), stac_dt)
+        int_env = _is_int_bucket(ziel)
+
+        self._running = True
+        T = DARK if self._dark else LIGHT
+        self.start_btn.config(state="disabled", fg=T["fg_dim"], disabledforeground=T["fg_dim"])
+        self._progress_lbl.config(
+            text=f"STAC-Prüfung ({'INT' if int_env else 'PROD'}: {item}) und Warteschlange im Bucket…")
+        self._progress_frame.pack(fill="x", padx=12, pady=(0, 4), before=self._btn_row)
+        self._progress_bar.start(10)
+        args = (gds, meta, quelle, quelle_display, ziel, stac_dt)
+        threading.Thread(target=self._run_stac_check,
+                         args=(item, int_env, args), daemon=True).start()
+
+    def _run_stac_check(self, item, int_env, args):
+        """Hintergrund-Thread: ein GET auf das STAC-Item (Timeout siehe _stac_check)
+        und die XML der wartenden Datenpakete im Bucket - beides Netzwerk, darum
+        nicht im GUI-Thread."""
+        gds, meta, ziel = args[0], args[1], args[4]
+        camera = meta.get("CameraSystem", "")
+        try:
+            stac = _stac_check.check_asset(item, gds, camera, int_env)
+        except Exception as e:
+            stac = {"item": item, "env": "INT" if int_env else "PROD",
+                    "status": "failed", "error": str(e)}
+        try:
+            queue_res = _stac_check.check_queue(ziel, item, _catalog_gds(gds, camera),
+                                                CATALOG_GDS_TYPES)
+        except Exception as e:
+            queue_res = {"status": "failed", "hits": [], "checked": 0, "unreadable": [],
+                         "error": str(e)}
+        self.after(0, lambda: self._on_stac_check_done(stac, queue_res, *args))
+
+    def _on_stac_check_done(self, stac, queue_res, gds, meta, quelle, quelle_display,
+                            ziel, stac_dt):
+        """Sicherheitscheck mit STAC- und Warteschlangen-Ergebnis (gleiches Asset
+        im Item oder in einem wartenden Paket sperrt den Import-Button) und Start."""
+        self._progress_bar.stop()
+        self._progress_frame.pack_forget()
+        self._progress_lbl.config(text="Verarbeitung läuft…")
+        self._running = False
+        self._update_start_btn_state()
+
+        status, env, item = stac.get("status"), stac.get("env", ""), stac.get("item", "")
+        if status == "new":
+            self._precheck_log.append(f"STAC-Prüfung ({env}): Item {item} existiert noch nicht.\n")
+        elif status == "free":
+            self._precheck_log.append(
+                f"STAC-Prüfung ({env}): Item {item} existiert, Asset dieses GDS fehlt noch "
+                f"(vorhanden: {', '.join(stac.get('assets', [])) or '–'}).\n")
+        elif status == "failed":
+            self._precheck_log.append(
+                f"[WARNUNG] STAC-Prüfung ({env}) nicht möglich: {stac.get('error', '')} "
+                f"- ohne Prüfung bestätigt.\n")
+        if queue_res.get("status") == "ok":
+            andere = ", ".join(f"{h['catalog']}\\{h['paket']}" for h in queue_res["hits"])
+            self._precheck_log.append(
+                f"Warteschlange im Bucket: {queue_res.get('checked', 0)} Datenpaket(e) geprüft"
+                + (f", mit diesem Item warten Pakete anderer GDS ({andere})" if andere else "")
+                + ".\n")
+        elif queue_res.get("status") == "failed":
+            self._precheck_log.append(
+                f"[WARNUNG] Warteschlange im Bucket nicht prüfbar: {queue_res.get('error', '')} "
+                f"- ohne Prüfung bestätigt.\n")
+        for u in queue_res.get("unreadable", []):
+            self._precheck_log.append(f"[WARNUNG] Warteschlange: nicht lesbar, nicht geprüft: {u}\n")
+
+        camera = meta.get("CameraSystem", "")
+        _tilekey, _tilekey_file = self._extract_tilekey_from_source(quelle, gds, camera)
         dlg = SicherheitsCheckDialog(
             self, gds, meta, quelle_display, ziel,
-            area=meta.get("AreaOverride") or self._extract_area_from_source(quelle, gds),
+            area=meta.get("AreaOverride") or self._extract_area_from_source(quelle, gds, camera),
             stac_dt=stac_dt,
             tilekey=_tilekey, tilekey_file=_tilekey_file,
+            stac=stac, queue_res=queue_res,
             dark=self._dark,
         )
         if not dlg.wait():
@@ -2814,11 +3077,11 @@ class GDWHApp(tk.Tk):
         self._pending_ziel = ziel
 
         self._log(f"=== GDWH Import gestartet – GDS: {gds} ===\n\n")
-        for line in getattr(self, "_crs_precheck_log", []):
+        for line in getattr(self, "_precheck_log", []):
             self._log(line)
-        if getattr(self, "_crs_precheck_log", None):
+        if getattr(self, "_precheck_log", None):
             self._log("\n")
-        self._crs_precheck_log = []
+        self._precheck_log = []
 
         threading.Thread(
             target=self._run_thread,
@@ -2862,7 +3125,7 @@ class GDWHApp(tk.Tk):
         if err or not paths:
             # Nichts zu pruefen oder Ordner nicht lesbar - Script 1/2_2 prueft zur Laufzeit
             if err:
-                self._crs_precheck_log.append(f"[WARNUNG] CRS-Vorprüfung: Quellordner nicht lesbar ({err})\n")
+                self._precheck_log.append(f"[WARNUNG] CRS-Vorprüfung: Quellordner nicht lesbar ({err})\n")
             self._start_import_confirmed(*args)
             return
 
@@ -2923,7 +3186,7 @@ class GDWHApp(tk.Tk):
         self._running = False
         self._update_start_btn_state()
 
-        note = self._crs_precheck_log.append
+        note = self._precheck_log.append
         if "failed" in result:
             note(f"[WARNUNG] CRS-Vorprüfung nicht möglich: {result['failed']}\n")
             if not messagebox.askyesno("CRS-Vorprüfung",
@@ -3030,6 +3293,9 @@ class GDWHApp(tk.Tk):
             "script_22":        SCRIPT_22,
             "script_3":         SCRIPT_3,
             "script_4":         SCRIPT_4,
+            "script_5":         SCRIPT_5,
+            "script_6":         SCRIPT_6,
+            "grid_shape":       GRID_SHAPE_1KM,
             "fix_false_nodata": bool(meta.get("FixFalseNodata")),
             "staging_dir":      self._staging_dir,
         }

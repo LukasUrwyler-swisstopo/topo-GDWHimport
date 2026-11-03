@@ -366,7 +366,8 @@ def _points_outside_frame_message(violation):
             f"bzw. beim Lieferanten nachfordern), dann Import wiederholen.")
 
 
-def check_tile_frame_plausibility(metadata, easting_km, northing_km, filename, src_path):
+def check_tile_frame_plausibility(metadata, easting_km, northing_km, filename, src_path,
+                                  gap_warn_m=TILE_FRAME_EPS_M):
     """Vergleicht die Quell-BBox gegen den nominalen 1x1-km-Kachelrahmen.
 
     Massgeblich sind die tatsaechlichen Punkte, die Header-BBox dient nur als
@@ -386,8 +387,10 @@ def check_tile_frame_plausibility(metadata, easting_km, northing_km, filename, s
     Den umgekehrten Fall (Header passt, Punkte ragen hinaus) faengt
     convert_tile nach der Konversion gegen die Punkt-Extremwerte ab.
 
-    Luecken zum Rand (z.B. Datenloecher) werden nur als Warnung geloggt,
-    NICHT repariert.
+    Luecken zum Rand (z.B. Datenloecher) groesser gap_warn_m werden nur als
+    Warnung geloggt, NICHT repariert. Bei Kacheln aus einem Raster-DSM (ADS80-
+    ASCII, Script 5) liegen die Punkte auf den Zellmitten - ein Randabstand
+    bis zu einer Zellbreite ist dort keine Datenluecke (gap_warn_m groesser).
 
     Gibt (warnings, header_stale) zurueck. header_stale=True: Header passt
     nachweislich nicht zu den Punkten - convert_tile schreibt die Kachel
@@ -421,7 +424,7 @@ def check_tile_frame_plausibility(metadata, easting_km, northing_km, filename, s
     f_minx, f_maxx, f_miny, f_maxy = _nominal_frame(easting_km, northing_km)
     for label, gap in (("West", minx - f_minx), ("Sued", miny - f_miny),
                        ("Ost", f_maxx - maxx), ("Nord", f_maxy - maxy)):
-        if gap > TILE_FRAME_EPS_M:
+        if gap > gap_warn_m:
             warnings.append(f"{filename}: Datenluecke am {label}-Rand von {gap:.2f} m "
                             f"(Kachelrahmen nicht vollstaendig gefuellt).")
     return warnings, header_stale
@@ -804,7 +807,8 @@ def validate_rgb_ranges(src_rgb, dst_rgb):
 
 
 # ****************************** Kernkonversion pro Tile ******************************
-def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=False):
+def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=False,
+                 gap_warn_m=TILE_FRAME_EPS_M):
     """Konvertiert eine einzelne Tile. Gibt ein Ergebnis-Dict zurueck:
       {"status": "ok" | "skipped_already_migrated" | "warning" | "failed",
        "warnings": [...], "error": str oder None,
@@ -840,7 +844,7 @@ def convert_tile(src_path, dst_dir, target_scale=0.01, dry_run=False, keep_rgb=F
 
     try:
         frame_warnings, header_stale = check_tile_frame_plausibility(
-            src_meta, easting_km, northing_km, name, src_path)
+            src_meta, easting_km, northing_km, name, src_path, gap_warn_m)
     except ValueError as e:
         result["error"] = str(e)
         return result
@@ -1037,7 +1041,7 @@ def _log_tile_result(name, result, summary):
 
 
 def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
-                    dry_run=False, workers=None, keep_rgb=False):
+                    dry_run=False, workers=None, keep_rgb=False, gap_warn_m=TILE_FRAME_EPS_M):
     """Batch-Konversion aller .laz-Dateien in input_dir - wiederverwendbare
     Kernfunktion, sowohl fuer die CLI (main(), siehe unten) als auch fuer den
     Aufruf als Modul (siehe _osgeo_runner.py: laeuft dort IMMER automatisch
@@ -1088,7 +1092,7 @@ def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
         for src_path in files:
             name = os.path.basename(src_path)
             result = convert_tile(src_path, output_dir, target_scale=target_scale,
-                                  dry_run=dry_run, keep_rgb=keep_rgb)
+                                  dry_run=dry_run, keep_rgb=keep_rgb, gap_warn_m=gap_warn_m)
             _log_tile_result(name, result, summary)
     else:
         log(f"Parallelisierung: {workers} gleichzeitige PDAL-Worker "
@@ -1096,7 +1100,7 @@ def convert_folder(input_dir, output_dir, recursive=False, target_scale=0.01,
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_name = {
                 executor.submit(convert_tile, src_path, output_dir,
-                                 target_scale, dry_run, keep_rgb): os.path.basename(src_path)
+                                 target_scale, dry_run, keep_rgb, gap_warn_m): os.path.basename(src_path)
                 for src_path in files
             }
             for future in as_completed(future_to_name):

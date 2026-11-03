@@ -30,6 +30,8 @@ Alle Angaben (GDS, Pfade, Meta-Informationen) werden direkt im GUI ausgefüllt �
 - **Daten ins GDWH-Bucket kopieren** inkl. `files.csv` (Hash, TileKey, Footprint)
 - Optionale Zusatzfunktion (siehe unten): falsche NoData-Pixel korrigieren
 - Bei `SB_DSM_PUNKTWOLKE`: automatische LAS-1.4-Vorkonversion vor dem Import (CRS-Tag byte-exakt; Punktformat PF6, bei `Leica DMC-4` PF7 mit Farbe)
+- Bei `SB_DSM_PUNKTWOLKE` mit `Leica ADS80`: ASCII-Punktwolke (ESRI-Grid `.asc` oder XYZ) wird in 1-km²-LAZ-Kacheln umgerechnet (swissGRID, TileKey = `NAME`)
+- Bei `SB_DOP` / `SB_DOP_16` mit `Leica ADS80`: OrthoVista-Kacheln werden pixelgenau auf das 1-km-Grid geschnitten (TileKey = `NAME`)
 - **CRS-Tag im TIFF** prüfen und bei Bedarf setzen (`SB_DSM`-DSM: `EPSG:2056+5728`, `SB_DSM`-Hillshade, `SB_DOP` und `SB_DOP_16`: `EPSG:2056`), bei DOPs mit Vorprüfung im GUI
 
 Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
@@ -40,10 +42,10 @@ Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 
 | GDS | Datenformat | Dateinamen-Format |
 |-----|-------------|--------------------|
-| `SB_DOP` | `.tif` / `.tfw` (8Bit RGB) | `202X_AREA_DOP_..._XXXX_YYYY_LV95.tif` |
-| `SB_DOP_16` | `.tif` / `.tfw` (16Bit NRGB) | `202X_AREA_DOP_..._XXXX_YYYY_LV95.tif` |
+| `SB_DOP` | `.tif` / `.tfw` (8Bit RGB) | `202X_AREA_DOP_..._XXXX_YYYY_LV95.tif`; bei ADS80 auch OrthoVista-Kacheln `202X_AREA_DOP_..._LV95_<Kachel>.tif`, siehe [ADS80](#leica-ads80-dop-in-orthovista-kacheln) |
+| `SB_DOP_16` | `.tif` / `.tfw` (16Bit NRGB) | `202X_AREA_DOP_..._XXXX_YYYY_LV95.tif`; bei ADS80 wie SB_DOP |
 | `SB_DSM` | `.tif` / `.tfw` (DSM + Hillshade) | `202X_AREA_DSM_..._LV95_LN02.tif` bzw. `202X_AREA_hillshade_..._LV95_LN02.tif` |
-| `SB_DSM_PUNKTWOLKE` | `.laz` (LAS 1.4, PF6 bzw. PF7 mit RGB bei DMC-4) | `202X_AREA_TIN_..._XXXX_YYYY_LV95_LN02.laz` |
+| `SB_DSM_PUNKTWOLKE` | `.laz` (LAS 1.4, PF6 bzw. PF7 mit RGB bei DMC-4); bei ADS80 auch ASCII `.asc` / `.xyz` / `.ascii`, siehe [ADS80](#leica-ads80-ascii-punktwolke) | `202X_AREA_TIN_..._XXXX_YYYY_LV95_LN02.laz` bzw. `202X_AREA_DSM_....asc` |
 
 > `XXXX_YYYY` = TileKey (z.B. `2601_1136`). `_LV95` muss im Dateinamen enthalten sein. Das GUI zeigt den TileKey der ersten Datei als Vorschau (mit Warnhinweis, wenn er nicht passt); der Button **Check - NameFormat** prüft alle Dateinamen im Quellordner.
 
@@ -59,16 +61,21 @@ Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 4. Meta-Informationen eingeben  (Dropdowns / Freitext)
 5. (nur SB_DOP / SB_DOP_16) CRS-Vorprüfung der TIFF, Dialog bei falschem Höhenbezug
    bzw. bei fremdem CRS mit LV95-Koordinaten (Option: auf EPSG:2056 umtaggen)
-6. Sicherheitscheck bestätigen  (Kontrollfragen)
-7. Import starten
+6. STAC-Prüfung (PROD/INT je nach Zielpfad): existiert das Asset des GDS schon im Item
+   oder wartet im Bucket ein Datenpaket desselben GDS mit demselben Item (= gleiches
+   Asset), bleibt der Import gesperrt
+7. Sicherheitscheck bestätigen  (Kontrollfragen)
+8. Import starten
+   → (nur SB_DSM_PUNKTWOLKE mit ADS80 und ASCII-Input: ASCII -> 1-km²-LAZ-Kacheln, Script 5)
+   → (nur SB_DOP / SB_DOP_16 mit ADS80: OrthoVista-Kacheln -> 1-km-Grid, Script 6)
    → (nur SB_DSM_PUNKTWOLKE: LAS-1.4-Vorkonversion, automatisch)
    → Quellordner bereinigen
    → CRS-Tag im TIFF prüfen/setzen  (SB_DSM, SB_DOP, SB_DOP_16)
    → XML generieren
    → NoData-Tag & Maske setzen  (nur Raster)
    → Daten ins Bucket kopieren + files.csv erstellen
-8. GDWH-Portal: Datenpaket prüfen (CHECK) und importieren
-9. STAC-Import läuft automatisch
+9. GDWH-Portal: Datenpaket prüfen (CHECK) und importieren
+10. STAC-Import läuft automatisch
 ```
 
 Der **Import-Button** bleibt gesperrt, bis alle Pflichtfelder ausgefüllt sind.
@@ -173,6 +180,40 @@ ohne Flag Mask korrekt dargestellt wird.
 
 Bei ADS (ADS100 / ADS80) gilt: NoData frei wählbar, Vorkorrektur optional, TerrainModel frei wählbar, Punktwolken immer PF6. Enthält eine Punktwolken-Kachel trotzdem RGB-Werte, bricht der Import ab – ADS liefert nie Farbe, das `CameraSystem` ist dann vermutlich falsch gewählt. `SB_DOP_16` (ADS-Einzellinien) ist von beidem nicht betroffen.
 
+## Leica ADS80: ASCII-Punktwolke
+
+ADS80 liefert die DSM-Punktwolke nicht in 1-km-LAZ-Kacheln, sondern als **eine ASCII-Datei pro Gebiet**. Bei `SB_DSM_PUNKTWOLKE` mit `CameraSystem = Leica ADS80` akzeptiert das GUI deshalb auch `.asc`, `.xyz` und `.ascii` im Quellordner. Beim Import rechnet [Script 5](processingScripts/5_SB_DSM_PUNKTWOLKE_ASCIItoLAZtiles.py) sie **vor** der LAS-1.4-Vorkonversion in LAZ-Kacheln um (übernommen aus `topo-DSMpointcloudConverter`):
+
+| Schritt | |
+|---|---|
+| Format erkennen (am Inhalt, nicht an der Endung) | **ESRI-ASCII-Grid** (Kopf `NCOLS`/`NROWS`/`CELLSIZE`/`NODATA_VALUE`): ein Punkt je Zellmitte, NODATA-Zellen werden verworfen (`readers.gdal`). **XYZ-Punktliste** (`X Y Z`, Trennzeichen/Kopfzeilen automatisch): `readers.text`, grosse Dateien in Teilen parallel |
+| Prüfen | Lage LV95 (LV03 → Abbruch), Z plausibel (nur Warnung), überlappende Dateien → Abbruch (z.B. `.asc` **und** `.xyz` desselben Gebiets im Quellordner) |
+| Kacheln | `swissGRID_1km2_shp/chGRID_1km2.shp`, TileKey = Feld `NAME` (z.B. `2795_1189`), halb-offene Kachelgrenzen (ein Punkt auf der km-Linie gehört genau einer Kachel), Punktbilanz Input = Output |
+| Name | `<Jahr>_<Area>_TIN_DSM_<NAME>_LV95_LN02.laz` – Jahr aus der ersten Line_ID, Area aus dem Feld „Area“ (aus dem ASCII-Namen `202X_<AREA>_DSM_…` vorbelegt) |
+| Danach | wie jede LAZ-Lieferung: Script 4 (LAS 1.4/PF6, CRS `EPSG:2056+5728` byte-exakt, Kachelrahmen) und Script 1 (XML, Kopie, `files.csv`) – Metadaten also identisch zu ADS100 |
+
+Lage immer LV95, Höhe immer LN02 – es wird nichts umgerechnet. Die Quelldatei bleibt unverändert, alle Zwischendateien liegen im Staging. ASCII **und** LAZ im selben Quellordner sind nicht erlaubt (unklar, welche Variante gemeint ist). Bei anderen CameraSystemen werden ASCII-Dateien wie bisher ignoriert. Randabstände bis 1 m meldet Script 4 bei diesen Kacheln nicht als Datenlücke (Punkte auf Zellmitten).
+
+Platzbedarf im Staging: vorübergehend die ASCII-Kopie plus etwa dreimal die Datenmenge als LAZ (Zwischen-LAZ, Kachelstücke, Kacheln). `pdal.exe` ist nicht long-path-fähig – Staging-Pfade über 259 Zeichen brechen vor dem Lauf ab.
+
+## Leica ADS80: DOP in OrthoVista-Kacheln
+
+Die ADS80-DOPs (`SB_DOP` und `SB_DOP_16`) liegen nicht auf dem 1-km-Grid, sondern in beliebig grossen OrthoVista-Kacheln (< 4 GB, z.B. 4375 × 3000 m), benannt `…_LV95_<Kachel>.tif` + `.tfw`. Mit `CameraSystem = Leica ADS80` schneidet [Script 6](processingScripts/6_SB_DOP_ADS80_TILEStoGRID1km.py) sie beim Import auf das Grid – danach läuft alles wie bei ADS100:
+
+```
+2016_SILVRETTA_DOP_25cm_LV95_1178-33.tif   ->   2016_SILVRETTA_DOP_25cm_<NAME>_LV95.tif (+ .tfw)
+                                                 wie ADS100: 2020_SILVRETTA_DOP_10cm_2797_1191_LV95.tif
+```
+
+| Schritt | |
+|---|---|
+| Prüfen | alle Kacheln gleiche Bänder/Datentyp/GSD, keine Rotation, Lage LV95, keine Überlappung, gleicher Name vor `_LV95` (ein Kachelsatz). **Pixelraster auf den km-Linien** (Ursprung auf dem GSD-Raster, 1000 m = n × GSD) – sonst Abbruch statt Resampling |
+| Mosaik | virtuell (GDAL-VRT), kein physisches Merge-TIFF; Hintergrund = **Input NoData aus dem GUI** (z.B. `255 255 255`), ohne NoData-Tag |
+| Schneiden | je swissGRID-Zelle (`NAME`) pixelgenau (`gdal.Translate`, kein Resampling), Format wie die ADS100-Kacheln: GTiff unkomprimiert, 256er-Blöcke, TFW, noch ohne CRS-Tag. Kacheln nur aus NoData werden nicht geschrieben |
+| Danach | SB_DOP: Vorkorrektur (Script 3, optional) und Script 1 (NoData-Tag, Maske, `EPSG:2056`, XML, Kopie); SB_DOP_16: Script 2_2 – jeweils auf den neuen Kacheln |
+
+Der Name vor `_LV95` bleibt erhalten – bei `SB_DOP_16` also auch `<HHMM>NRGB`. **SB_DOP_16**: alle Einzellinien liegen wie bei ADS100 im INPUT_FOLDER, Script 2_1 sortiert sie in Unterordner; geschnitten wird **pro Linie** (Linien überlappen sich, ein gemeinsames Mosaik wäre ein Mischbild). Liegen ADS80-DOPs bereits in 1-km-Kacheln (`…_XXXX_YYYY_LV95.tif`, Ausdehnung = eine Zelle), wird nichts geschnitten. Die Quelle bleibt unverändert, Vorkorrektur und Script 1 arbeiten auf den neuen Kacheln im Staging. Platzbedarf im Staging: Input-Kopie plus etwa dieselbe Menge für die neuen Kacheln.
+
 ---
 
 ## Optionale Zusatzfunktionen
@@ -207,7 +248,7 @@ Bei grossen Lieferungen über ein Netzlaufwerk kann ein lokaler Zwischenordner a
 
 - **Normales Python 3.x** zum Starten der GUI (kein OSGeo4W-Start nötig)
   - Die GUI findet den OSGeo4W-Python-Pfad automatisch, alternativ Button **Ändern…**
-- **PDAL-CLI**, nur für `SB_DSM_PUNKTWOLKE` (LAS-1.4-Vorkonversion, läuft automatisch)
+- **PDAL-CLI**, nur für `SB_DSM_PUNKTWOLKE` (LAS-1.4-Vorkonversion, läuft automatisch; bei ADS80 auch ASCII → LAZ)
 - Netzwerkzugriff auf das GDWH-Bucket
 - Korrektes Dateinamen-Format (siehe Tabelle oben) – zwingend für die XML-Generierung
 
@@ -240,6 +281,26 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 - **Line_IDs**: Die erste Line_ID bestimmt den Aufnahmezeitpunkt und muss die früheste Befliegung sein – die GUI sortiert automatisch (DMC-4 nach Linienstart). Bei `SB_DOP_16` ist nur eine Line_ID im Hauptfeld erlaubt, alle weiteren gehören ins Feld `allAreaLineIDs`.
 - **Zielpfad**: muss den GDS-Namen als vorletzten Ordner enthalten (z.B. `…\SB_DSM\2025_AREA_DSM`), bei `SB_DOP` mit DMC-4 den Catalog-Namen `SB_DOP_DMC` (z.B. `…\SB_DOP_DMC\2026_GUPPENFIRN_DOP`). Sonst erscheint vor dem Import eine Warnung.
 - **Sicherheitscheck**: Vor dem Import müssen alle Kontrollfragen bestätigt werden (Pfade, Line_IDs, NoData-Werte vorgängig visuell prüfen).
+- **STAC-Prüfung**: Das Item `{Auftragstyp}-{StacItemIdDatetime}` hängt nur an der ersten Line_ID, die Area kommt im STAC nicht vor. Zwei Areas aus derselben Line_ID würden sich darum in GDWH und STAC überschreiben. Vor dem Sicherheitscheck fragt die GUI das Item ab (`BUCKET` → `data.geo.admin.ch`, `BUCKET_INT` → `sys-data.int.bgdi.ch`):
+
+  | Ergebnis | Sicherheitscheck |
+  |---|---|
+  | Item existiert nicht | grün, Import möglich |
+  | Item existiert, Asset des GDS fehlt | gelb, Hinweis mit den vorhandenen Assets – der Import ergänzt das Item |
+  | Asset des GDS existiert | rot, **Import-Button gesperrt** – für einen Re-Import das Asset zuerst manuell aus dem Item löschen |
+  | STAC nicht erreichbar | rot, Zusatzfrage „ohne STAC-Prüfung sichergestellt, dass kein Asset existiert?“ |
+
+  Asset je GDS: `SB_DOP` `rgb-mosaic.tif` (DMC-4: `rgbn-mosaic.tif`), `SB_DOP_16` `nrgb-16bit.tif`, `SB_DSM` `dsm-raster.tif` / `dsm-hillshade.tif`, `SB_DSM_PUNKTWOLKE` `pointcloud.copc.laz`.
+
+  **Warteschlange im Bucket:** Ein Import erscheint im STAC erst nach CHECK + GDWH-Import. GDWH löscht/verschiebt das Datenpaket danach aus dem Bucket, der Bucket enthält also genau die wartenden Pakete. Die GUI liest darum zusätzlich pro wartendem Paket (alle Catalog-Ordner im selben Bucket, ohne das Zielpaket) das erste XML unter `NV` (SB_DSM: `NV\DSM` / `NV\HILLSHADE`) und vergleicht `Auftragstyp` und `StacItemIdDatetime`. Catalog und Asset-Name gehören 1:1 zusammen:
+
+  | Wartendes Paket mit demselben Item | Sicherheitscheck |
+  |---|---|
+  | gleicher Catalog (gleiches Asset) | rot, **Import-Button gesperrt** |
+  | anderer Catalog (anderes Asset, ergänzt das Item) | gelb, Hinweis mit Paket und Area |
+  | Bucket nicht prüfbar (keine Catalog-Ordner gefunden) | rot, Zusatzfrage „ohne Prüfung der Warteschlange sichergestellt?“ |
+
+  Gesperrt wird also nur, was dasselbe Asset erzeugen würde – die Area ist dafür nicht massgebend und wird nur angezeigt. Leere Pakete (im Portal angelegt, noch ohne XML) werden übersprungen, nicht lesbare XML nur als Hinweis angezeigt.
 - **Nach dem Import**: Die Validierung im GDWH-Portal (CHECK) muss erfolgreich sein, bevor der eigentliche Import gestartet wird. STAC folgt danach automatisch.
 
 ---
@@ -257,8 +318,13 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 | `processingScripts/2_2_SB_DOP_16_GDS_upload_GDWH_withCHECKxml.py` | Sub-Script für `SB_DOP_16` | (direkt möglich, Working Part anpassen) |
 | `processingScripts/3_fix_false_nodata_dop.py` | Optionale NoData-Vorkorrektur (SB_DOP), läuft in-place vor Script 1 | ✓ (eigenständiges CLI, siehe Docstring) |
 | `processingScripts/4_SB_DSM_PUNKTWOLKE_LAS14upgrade.py` | LAS-1.4-Vorkonversion (SB_DSM_PUNKTWOLKE), läuft immer automatisch vor Script 1, schreibt auf Arbeitskopie; Ziel PF6, bei DMC-4 PF7 mit Pflicht-RGB (CLI: `--keep-rgb`) | ✓ (eigenständiges CLI, siehe Docstring) |
+| `processingScripts/5_SB_DSM_PUNKTWOLKE_ASCIItoLAZtiles.py` | ADS80: ASCII-Punktwolke (ESRI-Grid / XYZ) → 1-km²-LAZ-Kacheln per Grid-Shape, läuft vor Script 4 (aus `topo-DSMpointcloudConverter`, gekürzt) | – |
+| `processingScripts/6_SB_DOP_ADS80_TILEStoGRID1km.py` | ADS80: OrthoVista-DOP-Kacheln (SB_DOP / SB_DOP_16) → 1-km-Kacheln per Grid-Shape (VRT, pixelgenau), läuft vor Script 3/1 bzw. 2_2 | – |
+| `processingScripts/_grid_1km.py` | Grid-Shape lesen und prüfen (TileKey = `NAME`), von Script 5 und 6 genutzt | – |
+| `swissGRID_1km2_shp/` | swissGRID 1 km² (EPSG:2056, Feld `NAME`) für Script 5 und 6 | – |
 | `processingScripts/_line_ids.py` | LineID-Formate je CameraSystem (Prüfung, Sortierung, BandID, STAC-Datum), von GUI und Script 1 genutzt | – |
 | `processingScripts/_datenpaket.py` | Ordnerstruktur des GDWH-Datenpakets: liest bei `SB_DSM_PUNKTWOLKE` die Schreibweise von `PreCalculatedFormats`/`PrecalculatedFormats` aus dem Bucket-Pfad (GDWH stellt per Deploy auf grosses C um), von GUI (Prüfung vor dem Start) und Script 1 (Kopie, `files.csv`) genutzt | – |
+| `processingScripts/_stac_check.py` | STAC-Prüfung vor dem Start (nur lesend, nur Standardbibliothek): existiert das Asset des GDS schon im Item (PROD/INT), wartet im Bucket ein Datenpaket mit demselben Item, von der GUI genutzt | – |
 | `processingScripts/_tiff_crs.py` | CRS-Tag im TIFF prüfen/setzen, von Script 1, Script 2_2 und der GUI-Vorprüfung (DOP, Aufruf nur lesend via OSGeo4W Python) genutzt | – |
 | `processingScripts/_osgeo_runner.py` | Interner Subprocess-Runner (OSGeo4W Python) | – |
 | `processingScripts/_tif_preview_reader.py` | Interner Subprocess-Helper: erzeugt die TIF-Vorschau im GUI | – |
