@@ -3098,6 +3098,8 @@ class GDWHApp(tk.Tk):
         self._update_start_btn_state()
 
         status, env, item = stac.get("status"), stac.get("env", ""), stac.get("item", "")
+        if stac.get("via"):
+            env = f"{env}, via {stac['via']}"
         if status == "new":
             self._precheck_log.append(f"STAC-Prüfung ({env}): Item {item} existiert noch nicht.\n")
         elif status == "free":

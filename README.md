@@ -292,6 +292,8 @@ Prüft die reinen Python-Funktionen der Scripts in `processingScripts/` ohne OSG
 
   Asset je GDS: `SB_DOP` `rgb-mosaic.tif` (DMC-4: `rgbn-mosaic.tif`), `SB_DOP_16` `nrgb-16bit.tif`, `SB_DSM` `dsm-raster.tif` / `dsm-hillshade.tif`, `SB_DSM_PUNKTWOLKE` `pointcloud.copc.laz`.
 
+  **Verbindung:** zuerst über den Bundes-Proxy BVCOL (`proxy-bvcol.admin.ch:8080`, `PROXIES` in `_stac_check.py`), sonst direkt bzw. über `HTTPS_PROXY`. Die PAC-Konfiguration von Windows wertet Python nicht aus, ohne Proxy läuft die Abfrage auf der VDI in den Timeout. Bricht die Zertifikatsprüfung ab (Proxy mit TLS-Inspektion), wird derselbe Weg ohne Zertifikatsprüfung wiederholt (nur lesend, öffentliche Metadaten). Der verwendete Weg steht im Log.
+
   **Warteschlange im Bucket:** Ein Import erscheint im STAC erst nach CHECK + GDWH-Import. GDWH löscht/verschiebt das Datenpaket danach aus dem Bucket, der Bucket enthält also genau die wartenden Pakete. Die GUI liest darum zusätzlich pro wartendem Paket (alle Catalog-Ordner im selben Bucket, ohne das Zielpaket) das erste XML unter `NV` (SB_DSM: `NV\DSM` / `NV\HILLSHADE`) und vergleicht `Auftragstyp` und `StacItemIdDatetime`. Catalog und Asset-Name gehören 1:1 zusammen:
 
   | Wartendes Paket mit demselben Item | Sicherheitscheck |

@@ -23,6 +23,7 @@ Item-ID im selben Catalog), die Area ist dafuer nicht massgebend.
 import json
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -33,6 +34,12 @@ COLLECTION    = "ch.swisstopo.spezialbefliegungen"
 STAC_API_PROD = "https://data.geo.admin.ch/api/stac/v1"
 STAC_API_INT  = "https://sys-data.int.bgdi.ch/api/stac/v1"
 TIMEOUT_S     = 15
+
+# Die VDI kommt nur ueber den Proxy der Bundesverwaltung ins Internet. urllib
+# wertet die PAC-Konfiguration von Windows nicht aus und liefe ohne explizite
+# Angabe in den Timeout. Ausserhalb des Bundesnetzes loest der Name nicht auf,
+# dann folgt sofort die direkte Verbindung (bzw. HTTPS_PROXY, falls gesetzt).
+PROXIES = (("BVCOL", "http://proxy-bvcol.admin.ch:8080"),)
 
 # Asset-Suffixe je GDS (geprueft an PROD und INT, 2026-11). SB_DOP mit DMC-4 ist
 # 4-Band RGBN. Andere Produkte im selben Item (z.B. 'qdop-rgb-mosaic.tif',
@@ -63,31 +70,62 @@ def item_url(item, int_env=False):
     return f"{api}/collections/{COLLECTION}/items/{item}"
 
 
+def _opener(proxy, verify):
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    handlers = [urllib.request.HTTPSHandler(context=ctx)]
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    return urllib.request.build_opener(*handlers)
+
+
+def _get_json(url, timeout):
+    """GET ueber die Proxies aus PROXIES, dann direkt. Der erste Weg mit einer
+    Antwort der API gilt. Gibt (code, data, via, error) zurueck: code 200 mit
+    data, 404, oder None, wenn kein Weg durchkam ('error' je Weg)."""
+    fehler = []
+    for via, proxy in [(f"Proxy {n}", u) for n, u in PROXIES] + [("direkt", None)]:
+        # Proxy mit TLS-Inspektion, deren CA nicht im Windows-Store liegt: zweiter
+        # Versuch ohne Zertifikatspruefung (nur lesend, oeffentliche Metadaten)
+        for verify in (True, False):
+            weg = via if verify else f"{via} ohne Zertifikatsprüfung"
+            try:
+                with _opener(proxy, verify).open(url, timeout=timeout) as r:
+                    return 200, json.load(r), weg, ""
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return 404, None, weg, ""
+                # z.B. 403/407 vom Proxy -> naechster Weg
+                fehler.append(f"{weg}: HTTP {e.code} {e.reason}")
+            except Exception as e:
+                # URLError (DNS/Netz), Timeout, kaputtes JSON
+                reason = getattr(e, "reason", e)
+                if verify and isinstance(reason, ssl.SSLCertVerificationError):
+                    continue
+                fehler.append(f"{weg}: {reason}")
+            break
+    return None, None, "", "; ".join(fehler)
+
+
 def check_asset(item, gds, camera, int_env=False, timeout=TIMEOUT_S):
     """Fragt das Item ab. 'status':
     'new'    Item existiert nicht (HTTP 404)
     'free'   Item existiert, Asset dieses GDS fehlt noch
     'exists' Asset existiert -> Import wuerde ueberschreiben
     'failed' nicht pruefbar ('error'), z.B. kein Netz, Timeout, ungueltige ID
-    Dazu 'assets' (alle Keys im Item), 'conflict' (vorhandene Keys dieses GDS)
-    und 'updated' (Item-Property)."""
+    Dazu 'assets' (alle Keys im Item), 'conflict' (vorhandene Keys dieses GDS),
+    'updated' (Item-Property) und 'via' (Verbindungsweg, siehe _get_json)."""
     res = {"item": item, "env": "INT" if int_env else "PROD", "status": "failed",
-           "assets": [], "conflict": [], "updated": "", "error": ""}
+           "assets": [], "conflict": [], "updated": "", "via": "", "error": ""}
     if not ITEM_ID_PAT.match(item or ""):
         res["error"] = f"ungültige Item-ID '{item}' (Auftragstyp/Line_ID prüfen)"
         return res
-    try:
-        with urllib.request.urlopen(item_url(item, int_env), timeout=timeout) as r:
-            data = json.load(r)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            res["status"] = "new"
-        else:
-            res["error"] = f"HTTP {e.code} {e.reason}"
-        return res
-    except Exception as e:
-        # URLError (kein Netz/Proxy/DNS), Timeout, kaputtes JSON
-        res["error"] = str(getattr(e, "reason", e))
+    code, data, res["via"], res["error"] = _get_json(item_url(item, int_env), timeout)
+    if code == 404:
+        res["status"] = "new"
+    if code != 200:
         return res
 
     keys   = sorted((data.get("assets") or {}).keys())
