@@ -81,6 +81,13 @@ def _opener(proxy, verify):
     return urllib.request.build_opener(*handlers)
 
 
+def _cert_error(err):
+    """Zertifikatspruefung fehlgeschlagen? ssl.SSLCertVerificationError gibt es
+    erst ab Python 3.7, davor ein ssl.SSLError mit derselben reason."""
+    return (isinstance(err, ssl.SSLError)
+            and getattr(err, "reason", "") == "CERTIFICATE_VERIFY_FAILED")
+
+
 def _get_json(url, timeout):
     """GET ueber die Proxies aus PROXIES, dann direkt. Der erste Weg mit einer
     Antwort der API gilt. Gibt (code, data, via, error) zurueck: code 200 mit
@@ -102,7 +109,7 @@ def _get_json(url, timeout):
             except Exception as e:
                 # URLError (DNS/Netz), Timeout, kaputtes JSON
                 reason = getattr(e, "reason", e)
-                if verify and isinstance(reason, ssl.SSLCertVerificationError):
+                if verify and _cert_error(reason):
                     continue
                 fehler.append(f"{weg}: {reason}")
             break
