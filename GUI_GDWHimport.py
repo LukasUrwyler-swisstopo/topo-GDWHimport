@@ -109,6 +109,16 @@ TERRAIN_MODELS = [
     "swissALTI3D", "swissALTI3D/DHM25", "swissSURFACE3D",
 ]
 CAMERA_SYSTEMS = ["Leica ADS100", "Leica ADS80", "Leica DMC-4"]
+# Vorauswahl des CameraSystems aus dem Aufnahmejahr der Inputdaten (beim Setzen
+# des Input-Pfads, im Dropdown weiterhin aenderbar).
+CAMERA_BY_YEAR = ((2008, 2016, "Leica ADS80"),
+                  (2017, 2025, "Leica ADS100"),
+                  (2026, 9999, "Leica DMC-4"))
+
+
+def _camera_for_year(year):
+    """CameraSystem fuer ein Aufnahmejahr, None ausserhalb von CAMERA_BY_YEAR."""
+    return next((cam for y0, y1, cam in CAMERA_BY_YEAR if y0 <= year <= y1), None)
 # Leica ADS80 liefert nicht in 1-km-Kacheln: SB_DSM_PUNKTWOLKE als ASCII pro
 # Gebiet (Script 5, Endungen wie dort ASCII_EXTENSIONS), SB_DOP / SB_DOP_16 in
 # OrthoVista-Kacheln ..._LV95_<Kachel>.tif (Script 6). Beides wird beim Import
@@ -1471,6 +1481,11 @@ class GDWHApp(tk.Tk):
                                        state="readonly", width=20)
         self.camera_cb.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=3)
         self.camera_var.trace_add("write", lambda *_: self._on_camera_change())
+        # Vorauswahl aus dem Jahr der Inputdaten (siehe _detect_camera_from_source)
+        self._camera_detected = None   # (jahr, camera, herkunft)
+        self.camera_auto_lbl = ttk.Label(cam_frame, font=("", 8))
+        self.camera_auto_lbl.grid(row=0, column=2, sticky="w", padx=(10, 0))
+        self._dim_labels.append(self.camera_auto_lbl)
         self.camera_block_lbl = ttk.Label(cam_frame, font=("", 9, "bold"),
             text="SB_DOP_16 gibt es mit Leica DMC-4 nicht – Import gesperrt "
                  "(GDS oder CameraSystem wechseln)")
@@ -1737,7 +1752,7 @@ class GDWHApp(tk.Tk):
         self.if_checkbtn.grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=3)
         self._check_format_btns.append(self.if_checkbtn)
         self.if_var.trace_add("write", lambda *_: self._reset_check_btn(self.if_checkbtn))
-        self.if_var.trace_add("write", lambda *_: self._refresh_area_tilekey_preview())
+        self.if_var.trace_add("write", lambda *_: self._on_source_path_change())
         self.if_hint = ttk.Label(self.if_frame, font=("", 8),
             text="Data-Input Path wird automatisch ergänzt:  INPUT_FOLDER\\<HHMM der Line_ID>")
         self.if_hint.grid(row=1, column=1, sticky="w", padx=(8, 0))
@@ -1760,7 +1775,7 @@ class GDWHApp(tk.Tk):
         self.quelle_checkbtn.grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=3)
         self._check_format_btns.append(self.quelle_checkbtn)
         self.quelle_var.trace_add("write", lambda *_: self._reset_check_btn(self.quelle_checkbtn))
-        self.quelle_var.trace_add("write", lambda *_: self._refresh_area_tilekey_preview())
+        self.quelle_var.trace_add("write", lambda *_: self._on_source_path_change())
         self.quelle_hint = ttk.Label(self.quelle_frame, font=("", 8))
         self.quelle_hint.grid(row=1, column=1, sticky="w", padx=(8, 0))
         self._dim_labels.append(self.quelle_hint)
@@ -2091,6 +2106,9 @@ class GDWHApp(tk.Tk):
                 except tk.TclError: pass
 
         self._update_camera_meta_rules()
+        # Anderes aktives Pfadfeld (SB_DOP_16: INPUT_FOLDER) - nur den Hinweis
+        # nachfuehren, eine Kamera-Auswahl bleibt beim GDS-Wechsel stehen
+        self._detect_camera_from_source(apply=False)
         self._refresh_area_tilekey_preview()
         self._update_start_btn_state()
 
@@ -2109,6 +2127,7 @@ class GDWHApp(tk.Tk):
             self._refresh_area_tilekey_preview()
         elif self.gds_var.get() in DOP_GDS:
             self._refresh_area_tilekey_preview(update_area=False)
+        self._update_camera_auto_hint()
         if removed:
             messagebox.showwarning(
                 "Line_IDs entfernt",
@@ -2230,6 +2249,81 @@ class GDWHApp(tk.Tk):
             # bei SB_DSM* traegt nodata_auto den Auto-Hinweis (siehe _on_gds_change)
             if gds in ("SB_DOP", "SB_DOP_16"):
                 self.nodata_auto.grid_remove()
+
+    # ── CameraSystem aus dem Jahr der Inputdaten ─────────────────────────────
+    _YEAR_FILE_RE = re.compile(r'^(20\d{2})_')
+    _YEAR_DIR_RE  = re.compile(r'^(20\d{2})$')
+
+    @staticmethod
+    def _detect_year_from_source(src_folder):
+        """(jahr, herkunft) der Inputdaten: Jahr am Anfang des ersten Daten-
+        Dateinamens (Namenskonvention aller GDS: 202X_AREA_...), inkl. 1 Unterebene
+        (SB_DOP_16 nach Script 2_1). Sonst ein Ordner '20XX' im Pfad (z.B.
+        A:\\2016\\SILVRETTA\\...). (None, '') wenn nichts gefunden."""
+        exts = ('.tif', '.tiff', '.laz') + PUNKTWOLKE_ASCII_EXT
+
+        def _in(folder):
+            for fn in sorted(os.listdir(folder)):
+                m = GDWHApp._YEAR_FILE_RE.match(fn)
+                if m and fn.lower().endswith(exts):
+                    return int(m.group(1)), fn
+            return None
+        try:
+            found = _in(src_folder)
+            if not found:
+                for sub in sorted(os.listdir(src_folder)):
+                    sub_path = os.path.join(src_folder, sub)
+                    if os.path.isdir(sub_path):
+                        found = _in(sub_path)
+                        if found:
+                            break
+            if found:
+                return found
+        except OSError:
+            pass
+        for part in reversed(os.path.normpath(src_folder).split(os.sep)):
+            if GDWHApp._YEAR_DIR_RE.match(part):
+                return int(part), f"Ordner {part}"
+        return None, ""
+
+    def _on_source_path_change(self):
+        """Input-Pfad geaendert: CameraSystem vorwaehlen, dann Area/TileKey-Vorschau."""
+        self._detect_camera_from_source()
+        self._refresh_area_tilekey_preview()
+
+    def _detect_camera_from_source(self, apply=True):
+        """Waehlt das CameraSystem nach dem Jahr der Inputdaten vor (siehe
+        CAMERA_BY_YEAR). Nur beim Setzen des Input-Pfads - eine spaetere Auswahl
+        im Dropdown bleibt bestehen, bis der Pfad wieder geaendert wird.
+        apply=False: nur den Hinweis neben dem Dropdown aktualisieren."""
+        if not hasattr(self, "camera_auto_lbl") or not hasattr(self, "quelle_var"):
+            return  # Widgets noch nicht aufgebaut
+        gds = self.gds_var.get()
+        src = (self.if_var.get() if gds == "SB_DOP_16" else self.quelle_var.get()).strip().strip('"')
+        if not src or not os.path.isdir(src):
+            self._camera_detected = None
+            self._update_camera_auto_hint()
+            return
+        year, origin = self._detect_year_from_source(src)
+        camera = _camera_for_year(year) if year else None
+        self._camera_detected = (year, camera, origin) if year else None
+        if apply and camera and camera != self.camera_var.get():
+            self.camera_var.set(camera)   # loest _on_camera_change aus
+        self._update_camera_auto_hint()
+
+    def _update_camera_auto_hint(self):
+        det = self._camera_detected
+        if not det:
+            self.camera_auto_lbl.config(text="")
+            return
+        year, camera, origin = det
+        if not camera:
+            text = f"Jahr {year} erkannt ({origin}) – kein CameraSystem hinterlegt, bitte wählen"
+        else:
+            text = f"Vorauswahl aus Jahr {year} ({origin}): {camera}"
+            if camera != self.camera_var.get():
+                text += "  – manuell geändert"
+        self.camera_auto_lbl.config(text=text)
 
     # ── Area / TileKey Live-Vorschau ─────────────────────────────────────────
     _TILEKEY_RE = re.compile(r'^\d{4}_\d{4}$')

@@ -54,7 +54,7 @@ Nach dem GDWH-Import erfolgt der **STAC-Import automatisch**.
 ## Ablauf im GUI
 
 ```
-1. GDS und Kamera (CameraSystem) wählen
+1. GDS und Kamera (CameraSystem) wählen  (Kamera wird beim Input-Pfad nach Jahr vorgewählt)
 2. Datenpaket im Portal anlegen  (Button "GDWH-PROD" / "GDWH-INT" neben dem GDWH-BUCKET Path,
    SB_DOP mit DMC-4 -> Catalog SB_DOP_DMC)
 3. Quell- und Zielpfad eingeben
@@ -90,7 +90,7 @@ Der **Import-Button** bleibt gesperrt, bis alle Pflichtfelder ausgefüllt sind.
 | `Area` | AOI-Name, wird aus dem Quellordner vorgeschlagen, ist aber editierbar |
 | `NoData` | NoData-Quellwert (bestimmt v.a. bei SB_DOP/SB_DOP_16 die Maskenberechnung) |
 | `TerrainModel` | verwendetes Geländemodell (bei DMC-4 fix DSM) |
-| `CameraSystem` | Kamerasystem (Leica ADS100 / ADS80 / DMC-4), gewählt im Kasten „Kamera-Auswahl“ unter der GDS-Auswahl. Bei DMC-4 gelten Sonderregeln, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln) |
+| `CameraSystem` | Kamerasystem (Leica ADS100 / ADS80 / DMC-4), gewählt im Kasten „Kamera-Auswahl“ unter der GDS-Auswahl. **Vorauswahl beim Setzen des Input-Pfads** nach dem Jahr der Daten (erste Datei `20XX_…`, sonst Jahresordner im Pfad wie `A:\2016\…`): 2008–2016 ADS80, 2017–2025 ADS100, ab 2026 DMC-4 – neben dem Dropdown steht, woraus erkannt wurde; im Dropdown jederzeit änderbar. Bei DMC-4 gelten Sonderregeln, siehe [Leica DMC-4](#leica-dmc-4-sonderregeln) |
 | `SourceRefSys` | fix `(EPSG:2056) CH1903+ / LV95_LN02` für alle GDS und CameraSysteme (XML-Feld `CoordinateReferenceSystem`, nur Werte aus dem GDWH-Wertebereich) |
 | `CustomAttribute` | Beschreibung des Datenprodukts (automatisch je GDS und CameraSystem) |
 | `Line_ID(s)` | Befliegungslinien – werden automatisch chronologisch sortiert; mehrere Zeilen per Copy/Paste aus Excel möglich. Format je CameraSystem, siehe [LineIDs bei DMC-4](#lineids-bei-dmc-4) |
